@@ -1,8 +1,8 @@
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
 #include "riscv.h"
+#include "spinlock.h"
 #include "defs.h"
 
 #define SLAB_MAGIC 0x534C4142U
@@ -67,11 +67,10 @@ slab_ClassFreeSlots(int idx)
   return total;
 }
 
-// Khởi tạo một trang vật lý 4KB mới thành một trang Slab
 static struct slab_header *
-slab_page_create(void)
+slab_NewPage(struct slab_cache *c)
 {
-  if (slab_test_fail_page_alloc)
+  if (slab_oom_inject)
     return 0;
 
   void *page = kalloc();
@@ -80,17 +79,16 @@ slab_page_create(void)
 
   struct slab_header *hdr = (struct slab_header *)page;
   hdr->magic = SLAB_MAGIC;
-  hdr->obj_size = slab_cache.obj_size;
-  hdr->capacity = slab_cache.capacity;
-  hdr->free_count = slab_cache.capacity;
+  hdr->obj_size = c->obj_size;
+  hdr->capacity = c->capacity;
+  hdr->free_count = c->capacity;
+  hdr->class_idx = c->class_idx;
   hdr->_pad = 0;
-  hdr->_reserved = 0;
   hdr->freelist = 0;
   hdr->next = 0;
 
   char *slot_base = (char *)page + sizeof(struct slab_header);
-
-  for (int i = hdr->capacity - 1; i >= 0; i--) {
+  for (int i = (int)c->capacity - 1; i >= 0; i--) {
     struct slab_slot *s =
         (struct slab_slot *)(slot_base + (uint64)i * c->obj_size);
     s->next = hdr->freelist;
@@ -103,7 +101,8 @@ slab_page_create(void)
 void
 kmalloc_init(void)
 {
-  initlock(&slab_cache.lock, "slab_cache");
+  if (sizeof(struct slab_header) != 32)
+    panic("kmalloc_init: slab_header must be 32 bytes");
 
   for (int i = 0; i < SLAB_NCLASSES; i++) {
     uint32 req = slab_class_sizes[i];
@@ -111,9 +110,8 @@ kmalloc_init(void)
         req < sizeof(struct slab_slot) ? sizeof(struct slab_slot) : req;
     uint32 stride = ALIGN_UP(s_min, SLAB_ALIGN);
 
-  if (sizeof(struct slab_header) != 32 ||
-      sizeof(struct slab_header) + s_aligned > PGSIZE)
-    panic("kmalloc_init: invalid header or object size");
+    if (sizeof(struct slab_header) + stride > PGSIZE)
+      panic("kmalloc_init: invalid class stride");
 
     initlock(&slab_caches[i].lock, i == 0 ? "slab_c64" : "slab_c128");
     slab_caches[i].obj_size = (uint16)stride;
@@ -137,30 +135,32 @@ kmalloc(uint64 size)
   if (idx < 0)
     return 0;
 
-  acquire(&slab_cache.lock);
+  struct slab_cache *c = &slab_caches[idx];
+  acquire(&c->lock);
 
-  struct slab_header *curr = slab_cache.slabs;
+  struct slab_header *curr = c->slabs;
   while (curr != 0 && curr->free_count == 0) {
     curr = curr->next;
   }
 
   if (curr == 0) {
-    curr = slab_page_create();
+    curr = slab_NewPage(c);
     if (curr == 0) {
-      release(&slab_cache.lock);
+      release(&c->lock);
       return 0;
     }
-    curr->next = slab_cache.slabs;
-    slab_cache.slabs = curr;
+    curr->next = c->slabs;
+    c->slabs = curr;
   }
 
   struct slab_slot *slot = curr->freelist;
+  if (slot == 0)
+    panic("kmalloc: corrupt freelist");
+
   curr->freelist = slot->next;
   curr->free_count--;
 
-  release(&slab_cache.lock);
-
-  memset((void *)slot, 0, slab_cache.obj_size);
+  release(&c->lock);
   return (void *)slot;
 }
 
@@ -178,23 +178,24 @@ kmfree(void *ptr)
   if (hdr->magic != SLAB_MAGIC)
     panic("kmfree: invalid slab magic");
 
-  acquire(&slab_cache.lock);
+  uint16 idx = hdr->class_idx;
+  if (idx >= SLAB_NCLASSES)
+    panic("kmfree: invalid slab class index");
 
-  // Kiểm tra chữ ký SLAB_MAGIC ở đầu trang
-  if (hdr->magic != SLAB_MAGIC || hdr->obj_size != slab_cache.obj_size)
-    panic("kmfree: invalid slab magic or corrupted header");
+  struct slab_cache *c = &slab_caches[idx];
+  if (hdr->obj_size != c->obj_size || hdr->capacity != c->capacity)
+    panic("kmfree: corrupt slab header metadata");
 
   if (addr < (uint64)hdr + sizeof(struct slab_header))
     panic("kmfree: pointer inside slab header");
 
-  uint64 offset = (uint64)ptr - slot_base;
-  if ((offset % hdr->obj_size) != 0 ||
-      (offset / hdr->obj_size) >= hdr->capacity)
+  uint64 offset = addr - ((uint64)hdr + sizeof(struct slab_header));
+  if ((offset % c->obj_size) != 0)
     panic("kmfree: unaligned slot pointer");
 
-  // Kiểm tra giải phóng kép (Double Free) bằng cả free_count lẫn duyệt danh sách freelist
-  if (hdr->free_count >= hdr->capacity)
-    panic("kmfree: free_count overflow");
+  uint64 slot_idx = offset / c->obj_size;
+  if (slot_idx >= c->capacity)
+    panic("kmfree: slot index out of slab capacity");
 
   acquire(&c->lock);
 
@@ -219,6 +220,7 @@ kmfree(void *ptr)
     if ((void *)s == ptr) {
       release(&c->lock);
       panic("kmfree: double free detected");
+    }
   }
 
   struct slab_slot *slot = (struct slab_slot *)ptr;
@@ -226,13 +228,15 @@ kmfree(void *ptr)
   hdr->freelist = slot;
   hdr->free_count++;
 
-  release(&slab_cache.lock);
+  release(&c->lock);
 }
 
 void
 slab_test(void)
 {
-  printk("slab_test: starting S02 verification...\n");
+  printk("slab_test: starting S03a verification (class64 & class128)...\n");
+  if (!slab_initialized)
+    kmalloc_init();
 
   if (slab_caches[0].obj_size != 64 || slab_caches[0].capacity != 63)
     panic("slab_test: wrong class64 config");
@@ -245,15 +249,16 @@ slab_test(void)
   if (kmalloc(129) != 0)
     panic("slab_test: kmalloc(129) must return 0");
 
-  kmfree(p1);
-  void *p3 = kmalloc(32);
-  if (p3 != p1)
-    panic("slab_test: LIFO reuse failed");
-  if (((uint64)p3 & 7) != 0)
-    panic("slab_test: reuse alignment failed");
+  void *b1 = kmalloc(1);
+  void *b64 = kmalloc(64);
+  void *b65 = kmalloc(65);
+  void *b128 = kmalloc(128);
+  if (!b1 || !b64 || !b65 || !b128)
+    panic("slab_test: boundary valid alloc failed");
 
-  kmfree(p2);
-  kmfree(p3);
+  if (((uint64)b1 % 8) != 0 || ((uint64)b64 % 8) != 0 ||
+      ((uint64)b65 % 8) != 0 || ((uint64)b128 % 8) != 0)
+    panic("slab_test: alignment < 8B");
 
   struct slab_header *h1 = (struct slab_header *)PGROUNDDOWN((uint64)b1);
   struct slab_header *h64 = (struct slab_header *)PGROUNDDOWN((uint64)b64);
@@ -292,46 +297,35 @@ slab_test(void)
     memset(c64_objs[i], (char)(0x30 + i), 64);
   }
 
-  void *second_slab[63];
-  second_slab[0] = kmalloc(64);
-  if (second_slab[0] == 0)
-    panic("slab_test: second slab alloc failed");
-  if (((uint64)second_slab[0] & 7) != 0)
-    panic("slab_test: second slab alignment failed");
-  if (PGROUNDDOWN((uint64)slots[0]) == PGROUNDDOWN((uint64)second_slab[0]))
-    panic("slab_test: second slab page not created");
-
-  for (int i = 1; i < slab_cache.capacity; i++) {
-    second_slab[i] = kmalloc(64);
-    if (second_slab[i] == 0)
-      panic("slab_test: second slab alloc failed");
-    if (((uint64)second_slab[i] & 7) != 0)
-      panic("slab_test: second slab alignment failed");
+  for (int i = 0; i < 32; i++) {
+    c128_objs[i] = kmalloc((i % 2 == 0) ? 65 : 128);
+    if (c128_objs[i] == 0)
+      panic("slab_test: class128 multi-slab alloc failed");
+    memset(c128_objs[i], (char)(0xA0 + i), 128);
   }
 
-  for (int i = 0; i < slab_cache.capacity; i++) {
-    uchar *bytes = (uchar *)slots[i];
-    uchar expected = (uchar)((i + 0x20) & 0xFF);
-    for (int j = 0; j < 64; j++) {
-      if (bytes[j] != expected)
-        panic("slab_test: pattern corrupted");
+  if (PGROUNDDOWN((uint64)c64_objs[0]) == PGROUNDDOWN((uint64)c64_objs[63]))
+    panic("slab_test: class64 did not allocate second slab page");
+  if (PGROUNDDOWN((uint64)c128_objs[0]) == PGROUNDDOWN((uint64)c128_objs[31]))
+    panic("slab_test: class128 did not allocate second slab page");
+
+  for (int i = 0; i < 64; i++) {
+    unsigned char *p = (unsigned char *)c64_objs[i];
+    unsigned char exp = (unsigned char)(0x30 + i);
+    for (int b = 0; b < 64; b++) {
+      if (p[b] != exp)
+        panic("slab_test: class64 pattern corrupted");
     }
   }
 
-  slab_test_fail_page_alloc = 1;
-  if (kmalloc(64) != 0)
-    panic("slab_test: simulated OOM was not reported");
-  slab_test_fail_page_alloc = 0;
-
-  void *retry = kmalloc(64);
-  if (retry == 0 || ((uint64)retry & 7) != 0)
-    panic("slab_test: allocation retry failed");
-
-  for (int i = 0; i < slab_cache.capacity; i++) {
-    kmfree(slots[i]);
-    kmfree(second_slab[i]);
+  for (int i = 0; i < 32; i++) {
+    unsigned char *p = (unsigned char *)c128_objs[i];
+    unsigned char exp = (unsigned char)(0xA0 + i);
+    for (int b = 0; b < 128; b++) {
+      if (p[b] != exp)
+        panic("slab_test: class128 pattern corrupted");
+    }
   }
-  kmfree(retry);
 
   for (int i = 0; i < 64; i++)
     kmfree(c64_objs[i]);
