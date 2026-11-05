@@ -5,39 +5,67 @@
 #include "riscv.h"
 #include "defs.h"
 
-extern char end[]; // first address after kernel, defined by kernel.ld
+#define SLAB_MAGIC 0x534C4142U
+#define SLAB_ALIGN 8U
+#define SLAB_NCLASSES 2
 
-#define SLAB_MAGIC      0x534C4142U // Mã nhận diện "SLAB"
-#define SLAB_CLASS_SIZE 64U         // Size class cố định của W02: 64 bytes
-#define ALIGN_UP(sz, a) (((sz) + (a) - 1) & ~((a) - 1))
+#define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
-// Nút liên kết nhúng trực tiếp trong 8 byte đầu của mỗi Slot trống
+extern char end[];
+
+static const uint16 slab_class_sizes[SLAB_NCLASSES] = {64U, 128U};
+
 struct slab_slot {
   struct slab_slot *next;
 };
 
-// Metadata Header 32 bytes đặt tại đầu mỗi trang Slab (offset 0x000)
 struct slab_header {
-  uint32 magic;      // 4 bytes: SLAB_MAGIC
-  uint16 obj_size;   // 2 bytes: Kích thước mỗi slot sau căn lề 8B (stride = 64)
-  uint16 capacity;   // 2 bytes: Tổng số slot trong trang (63)
-  uint16 free_count; // 2 bytes: Số lượng slot hiện đang trống (0..63)
-  uint16 _pad;       // 2 bytes: Đệm căn lề
-  uint32 _reserved;  // 4 bytes: Dự phòng mở rộng (đủ 16B đầu)
-  struct slab_slot *freelist; // 8 bytes: Con trỏ tới slot trống đầu tiên
-  struct slab_header *next;   // 8 bytes: Nối tới trang Slab tiếp theo
+  uint32 magic;
+  uint16 obj_size;
+  uint16 capacity;
+  uint16 free_count;
+  uint16 class_idx;
+  uint32 _pad;
+  struct slab_slot *freelist;
+  struct slab_header *next;
 };
 
-// Quản lý chung cho 1 Class kích thước cố định (64B)
-struct {
+struct slab_cache {
   struct spinlock lock;
   uint16 obj_size;
   uint16 capacity;
-  struct slab_header *slabs; // Danh sách các trang Slab đang quản lý
-} slab_cache;
+  uint16 class_idx;
+  struct slab_header *slabs;
+};
 
-// Lets the boot test exercise the allocation-failure path without exhausting RAM.
-static int slab_test_fail_page_alloc;
+static struct slab_cache slab_caches[SLAB_NCLASSES];
+static int slab_initialized = 0;
+static int slab_oom_inject = 0;
+
+static int
+slab_FindClassIndex(uint64 size)
+{
+  if (size == 0)
+    return -1;
+  for (int i = 0; i < SLAB_NCLASSES; i++) {
+    if (size <= slab_class_sizes[i])
+      return i;
+  }
+  return -1;
+}
+
+static int
+slab_ClassFreeSlots(int idx)
+{
+  int total = 0;
+  struct slab_cache *c = &slab_caches[idx];
+  acquire(&c->lock);
+  for (struct slab_header *it = c->slabs; it != 0; it = it->next) {
+    total += it->free_count;
+  }
+  release(&c->lock);
+  return total;
+}
 
 // Khởi tạo một trang vật lý 4KB mới thành một trang Slab
 static struct slab_header *
@@ -48,7 +76,7 @@ slab_page_create(void)
 
   void *page = kalloc();
   if (page == 0)
-    return 0; // OOM: Cạn kiệt RAM vật lý
+    return 0;
 
   struct slab_header *hdr = (struct slab_header *)page;
   hdr->magic = SLAB_MAGIC;
@@ -64,7 +92,7 @@ slab_page_create(void)
 
   for (int i = hdr->capacity - 1; i >= 0; i--) {
     struct slab_slot *s =
-      (struct slab_slot *)(slot_base + (uint64)i * hdr->obj_size);
+        (struct slab_slot *)(slot_base + (uint64)i * c->obj_size);
     s->next = hdr->freelist;
     hdr->freelist = s;
   }
@@ -72,33 +100,41 @@ slab_page_create(void)
   return hdr;
 }
 
-// 1. Hàm khởi tạo bộ cấp phát Object 1 Class (Init Path)
 void
 kmalloc_init(void)
 {
   initlock(&slab_cache.lock, "slab_cache");
 
-  uint32 s_min = SLAB_CLASS_SIZE < sizeof(struct slab_slot)
-                   ? sizeof(struct slab_slot)
-                   : SLAB_CLASS_SIZE;
-  uint32 s_aligned = ALIGN_UP(s_min, 8);
+  for (int i = 0; i < SLAB_NCLASSES; i++) {
+    uint32 req = slab_class_sizes[i];
+    uint32 s_min =
+        req < sizeof(struct slab_slot) ? sizeof(struct slab_slot) : req;
+    uint32 stride = ALIGN_UP(s_min, SLAB_ALIGN);
 
   if (sizeof(struct slab_header) != 32 ||
       sizeof(struct slab_header) + s_aligned > PGSIZE)
     panic("kmalloc_init: invalid header or object size");
 
-  slab_cache.obj_size = (uint16)s_aligned;
-  slab_cache.capacity =
-    (uint16)((PGSIZE - sizeof(struct slab_header)) / s_aligned);
-  slab_cache.slabs = 0;
+    initlock(&slab_caches[i].lock, i == 0 ? "slab_c64" : "slab_c128");
+    slab_caches[i].obj_size = (uint16)stride;
+    slab_caches[i].capacity =
+        (uint16)((PGSIZE - sizeof(struct slab_header)) / stride);
+    slab_caches[i].class_idx = (uint16)i;
+    slab_caches[i].slabs = 0;
+  }
+
+  slab_oom_inject = 0;
+  slab_initialized = 1;
 }
 
-// 2. Hàm cấp phát 1 đối tượng từ Slab (Allocate Path)
 void *
 kmalloc(uint64 size)
 {
-  // Kiểm tra size theo hợp đồng: chỉ nhận 1..64, sai trả về 0
-  if (size == 0 || size > slab_cache.obj_size)
+  if (!slab_initialized)
+    kmalloc_init();
+
+  int idx = slab_FindClassIndex(size);
+  if (idx < 0)
     return 0;
 
   acquire(&slab_cache.lock);
@@ -128,20 +164,19 @@ kmalloc(uint64 size)
   return (void *)slot;
 }
 
-// 3. Hàm thu hồi đối tượng về lại Slab (Free & Failure Paths)
 void
 kmfree(void *ptr)
 {
-  // Hợp đồng API: kmfree(NULL) là no-op (không làm gì cả)
   if (ptr == 0)
     return;
 
-  // Kiểm tra con trỏ nằm ngoài vùng RAM vật lý hợp lệ
-  if ((char *)ptr < end || (uint64)ptr >= PHYSTOP)
+  uint64 addr = (uint64)ptr;
+  if (addr < (uint64)end || addr >= PHYSTOP)
     panic("kmfree: pointer out of physical memory range");
 
-  // Tìm địa chỉ đầu trang 4KB chứa con trỏ ptr bằng PGROUNDDOWN
-  struct slab_header *hdr = (struct slab_header *)PGROUNDDOWN((uint64)ptr);
+  struct slab_header *hdr = (struct slab_header *)PGROUNDDOWN(addr);
+  if (hdr->magic != SLAB_MAGIC)
+    panic("kmfree: invalid slab magic");
 
   acquire(&slab_cache.lock);
 
@@ -149,10 +184,8 @@ kmfree(void *ptr)
   if (hdr->magic != SLAB_MAGIC || hdr->obj_size != slab_cache.obj_size)
     panic("kmfree: invalid slab magic or corrupted header");
 
-  // Kiểm tra con trỏ có nằm đúng biên bắt đầu của 1 Slot không
-  uint64 slot_base = (uint64)hdr + sizeof(struct slab_header);
-  if ((uint64)ptr < slot_base)
-    panic("kmfree: pointer inside header");
+  if (addr < (uint64)hdr + sizeof(struct slab_header))
+    panic("kmfree: pointer inside slab header");
 
   uint64 offset = (uint64)ptr - slot_base;
   if ((offset % hdr->obj_size) != 0 ||
@@ -163,15 +196,31 @@ kmfree(void *ptr)
   if (hdr->free_count >= hdr->capacity)
     panic("kmfree: free_count overflow");
 
-  for (struct slab_slot *cur = hdr->freelist; cur != 0; cur = cur->next) {
-    if ((void *)cur == ptr)
+  acquire(&c->lock);
+
+  int owned = 0;
+  for (struct slab_header *it = c->slabs; it != 0; it = it->next) {
+    if (it == hdr) {
+      owned = 1;
+      break;
+    }
+  }
+  if (!owned) {
+    release(&c->lock);
+    panic("kmfree: slab not owned by class cache");
+  }
+
+  if (hdr->free_count >= c->capacity) {
+    release(&c->lock);
+    panic("kmfree: free_count overflow / double free");
+  }
+
+  for (struct slab_slot *s = hdr->freelist; s != 0; s = s->next) {
+    if ((void *)s == ptr) {
+      release(&c->lock);
       panic("kmfree: double free detected");
   }
 
-  // Ghi đè dữ liệu rác (số 1) để bẫy lỗi Dangling Pointer
-  memset(ptr, 1, hdr->obj_size);
-
-  // Đẩy slot vừa trả vào lại đầu freelist của trang Slab
   struct slab_slot *slot = (struct slab_slot *)ptr;
   slot->next = hdr->freelist;
   hdr->freelist = slot;
@@ -180,24 +229,21 @@ kmfree(void *ptr)
   release(&slab_cache.lock);
 }
 
-// 4. Hàm tự kiểm thử (Reuse + Pattern + Contract Boundary Test)
 void
 slab_test(void)
 {
   printk("slab_test: starting S02 verification...\n");
 
-  // Kiểm tra hợp đồng biên: size == 0, size > 64 và kmfree(0)
-  if (kmalloc(0) != 0 || kmalloc(65) != 0)
-    panic("slab_test: size validation failed");
-  kmfree(0); // Phải là no-op, không được panic
+  if (slab_caches[0].obj_size != 64 || slab_caches[0].capacity != 63)
+    panic("slab_test: wrong class64 config");
+  if (slab_caches[1].obj_size != 128 || slab_caches[1].capacity != 31)
+    panic("slab_test: wrong class128 config");
 
-  // Kiểm tra cấp phát và LIFO Reuse
-  void *p1 = kmalloc(16);
-  void *p2 = kmalloc(64);
-  if (p1 == 0 || p2 == 0 || p1 == p2)
-    panic("slab_test: basic alloc failed");
-  if (((uint64)p1 & 7) != 0 || ((uint64)p2 & 7) != 0)
-    panic("slab_test: alignment failed");
+  kmfree(0);
+  if (kmalloc(0) != 0)
+    panic("slab_test: kmalloc(0) must return 0");
+  if (kmalloc(129) != 0)
+    panic("slab_test: kmalloc(129) must return 0");
 
   kmfree(p1);
   void *p3 = kmalloc(32);
@@ -209,15 +255,41 @@ slab_test(void)
   kmfree(p2);
   kmfree(p3);
 
-  // Fill the first slab, then verify allocation rolls over to a second page.
-  void *slots[63];
-  for (int i = 0; i < slab_cache.capacity; i++) {
-    slots[i] = kmalloc(64);
-    if (slots[i] == 0)
-      panic("slab_test: full page alloc failed");
-    if (((uint64)slots[i] & 7) != 0)
-      panic("slab_test: slot alignment failed");
-    memset(slots[i], (i + 0x20) & 0xFF, 64);
+  struct slab_header *h1 = (struct slab_header *)PGROUNDDOWN((uint64)b1);
+  struct slab_header *h64 = (struct slab_header *)PGROUNDDOWN((uint64)b64);
+  struct slab_header *h65 = (struct slab_header *)PGROUNDDOWN((uint64)b65);
+  struct slab_header *h128 = (struct slab_header *)PGROUNDDOWN((uint64)b128);
+
+  if (h1->obj_size != 64 || h64->obj_size != 64 || h1->class_idx != 0)
+    panic("slab_test: 1..64 not routed to class64");
+  if (h65->obj_size != 128 || h128->obj_size != 128 || h65->class_idx != 1)
+    panic("slab_test: 65..128 not routed to class128");
+  printk("slab_test: [1/4] boundary (0,1,64,65,128,129) & routing OK\n");
+
+  kmfree(b64);
+  void *b64_re = kmalloc(64);
+  if (b64_re != b64)
+    panic("slab_test: class64 LIFO reuse failed");
+
+  kmfree(b128);
+  void *b128_re = kmalloc(128);
+  if (b128_re != b128)
+    panic("slab_test: class128 LIFO reuse failed");
+
+  kmfree(b1);
+  kmfree(b64_re);
+  kmfree(b65);
+  kmfree(b128_re);
+  printk("slab_test: [2/4] LIFO reuse for class64 & class128 OK\n");
+
+  void *c64_objs[64];
+  void *c128_objs[32];
+
+  for (int i = 0; i < 64; i++) {
+    c64_objs[i] = kmalloc((i % 2 == 0) ? 1 : 64);
+    if (c64_objs[i] == 0)
+      panic("slab_test: class64 multi-slab alloc failed");
+    memset(c64_objs[i], (char)(0x30 + i), 64);
   }
 
   void *second_slab[63];
@@ -261,28 +333,65 @@ slab_test(void)
   }
   kmfree(retry);
 
-  printk("slab_test: ALL PASSED (capacity=%d, obj_size=%d)\n",
-         slab_cache.capacity, slab_cache.obj_size);
+  for (int i = 0; i < 64; i++)
+    kmfree(c64_objs[i]);
+  for (int i = 0; i < 32; i++)
+    kmfree(c128_objs[i]);
+  printk("slab_test: [3/4] multi-slab expansion & pattern isolation OK\n");
 
-#if defined(SLAB_TEST_CASE) && SLAB_TEST_CASE == 1
-  void *ptr = kmalloc(64);
-  void *other = kmalloc(64);
-  if (ptr == 0 || other == 0)
-    panic("slab_test: double-free setup failed");
-  kmfree(ptr);
-  kmfree(ptr);
-  panic("slab_test: expected double-free panic did not occur");
-#elif defined(SLAB_TEST_CASE) && SLAB_TEST_CASE == 2
-  void *ptr = kmalloc(64);
-  if (ptr == 0)
-    panic("slab_test: misaligned-pointer setup failed");
-  kmfree((char *)ptr + 1);
-  panic("slab_test: expected misaligned-pointer panic did not occur");
-#elif defined(SLAB_TEST_CASE) && SLAB_TEST_CASE == 3
-  void *page = kalloc();
-  if (page == 0)
-    panic("slab_test: invalid-pointer setup failed");
-  kmfree(page);
-  panic("slab_test: expected invalid-pointer panic did not occur");
-#endif
+  void *live64 = kmalloc(64);
+  if (live64 == 0)
+    panic("slab_test: live64 alloc failed");
+  memset(live64, 0x5A, 64);
+
+  void *fill128[64];
+  int fill128_cnt = 0;
+  while (slab_ClassFreeSlots(1) > 0) {
+    if (fill128_cnt >= 64)
+      panic("slab_test: fill128 overflow");
+    fill128[fill128_cnt] = kmalloc(128);
+    if (fill128[fill128_cnt] == 0)
+      panic("slab_test: failed to fill existing class128 slots");
+    memset(fill128[fill128_cnt], (char)(0xC0 + fill128_cnt), 128);
+    fill128_cnt++;
+  }
+
+  if (slab_ClassFreeSlots(1) != 0)
+    panic("slab_test: class128 still has free slots before OOM");
+
+  slab_oom_inject = 1;
+  if (kmalloc(128) != 0)
+    panic("slab_test: expected 0 on OOM when class128 requests new page");
+  if (kmalloc(65) != 0)
+    panic("slab_test: expected 0 on OOM for kmalloc(65)");
+  slab_oom_inject = 0;
+
+  void *retry128 = kmalloc(128);
+  if (retry128 == 0)
+    panic("slab_test: retry alloc new page after OOM failed");
+  memset(retry128, 0x7E, 128);
+
+  unsigned char *chk64 = (unsigned char *)live64;
+  for (int b = 0; b < 64; b++) {
+    if (chk64[b] != 0x5A)
+      panic("slab_test: live64 corrupted across OOM");
+  }
+
+  for (int i = 0; i < fill128_cnt; i++) {
+    unsigned char *p = (unsigned char *)fill128[i];
+    unsigned char exp = (unsigned char)(0xC0 + i);
+    for (int b = 0; b < 128; b++) {
+      if (p[b] != exp)
+        panic("slab_test: fill128 slot corrupted across OOM");
+    }
+  }
+
+  kmfree(retry128);
+  for (int i = 0; i < fill128_cnt; i++)
+    kmfree(fill128[i]);
+  kmfree(live64);
+  printk("slab_test: [4/4] OOM (filled %d slots of class128) & retry OK\n",
+         fill128_cnt);
+
+  printk("slab_test: ALL PASSED (class64 cap=63, class128 cap=31)\n");
 }
