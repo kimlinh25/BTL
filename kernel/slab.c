@@ -5,8 +5,8 @@
 #include "spinlock.h"
 #include "defs.h"
 
-#define SLAB_MAGIC 0x534C4142U
-#define SLAB_ALIGN 8U
+#define SLAB_MAGIC    0x534C4142U
+#define SLAB_ALIGN    8U
 #define SLAB_NCLASSES 2
 
 #define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
@@ -90,7 +90,7 @@ slab_NewPage(struct slab_cache *c)
   char *slot_base = (char *)page + sizeof(struct slab_header);
   for (int i = (int)c->capacity - 1; i >= 0; i--) {
     struct slab_slot *s =
-        (struct slab_slot *)(slot_base + (uint64)i * c->obj_size);
+      (struct slab_slot *)(slot_base + (uint64)i * c->obj_size);
     s->next = hdr->freelist;
     hdr->freelist = s;
   }
@@ -107,7 +107,7 @@ kmalloc_init(void)
   for (int i = 0; i < SLAB_NCLASSES; i++) {
     uint32 req = slab_class_sizes[i];
     uint32 s_min =
-        req < sizeof(struct slab_slot) ? sizeof(struct slab_slot) : req;
+      req < sizeof(struct slab_slot) ? sizeof(struct slab_slot) : req;
     uint32 stride = ALIGN_UP(s_min, SLAB_ALIGN);
 
     if (sizeof(struct slab_header) + stride > PGSIZE)
@@ -116,7 +116,7 @@ kmalloc_init(void)
     initlock(&slab_caches[i].lock, i == 0 ? "slab_c64" : "slab_c128");
     slab_caches[i].obj_size = (uint16)stride;
     slab_caches[i].capacity =
-        (uint16)((PGSIZE - sizeof(struct slab_header)) / stride);
+      (uint16)((PGSIZE - sizeof(struct slab_header)) / stride);
     slab_caches[i].class_idx = (uint16)i;
     slab_caches[i].slabs = 0;
   }
