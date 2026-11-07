@@ -388,4 +388,5 @@ slab_test(void)
          fill128_cnt);
 
   printk("slab_test: ALL PASSED (class64 cap=63, class128 cap=31)\n");
+  
 }
