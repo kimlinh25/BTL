@@ -98,6 +98,23 @@ kalloc(void)
     kmem[id].freelist = r->next;
 
   release(&kmem[id].lock);
+
+  // Nếu không tìm thấy trang trong freelist của CPU hiện tại, thử tìm kiếm trong freelist của các CPU khác
+  if (!r)
+    for (int donor = 0; donor < NCPU; donor++) {
+      if (donor == id)
+        continue; // Bỏ qua CPU hiện tại
+
+      acquire(&kmem[donor].lock);
+      r = kmem[donor].freelist;
+      if (r)
+        kmem[donor].freelist = r->next;
+      release(&kmem[donor].lock);
+
+      if (r)
+        break; // Nếu tìm thấy trang, thoát khỏi vòng lặp
+    }
+
   pop_off(); // Bật lại ngắt
 
   if (r)
