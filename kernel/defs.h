@@ -194,3 +194,6 @@ void            kmalloc_init(void);
 void*           kmalloc(uint64 size);
 void            kmfree(void *ptr);
 void            slab_test(void);
+
+// slabtest.c
+void            slabtest(int);

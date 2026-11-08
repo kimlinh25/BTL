@@ -22,6 +22,9 @@ main()
 #endif
     kmalloc_init();
     slab_test();
+#ifdef SLABTEST
+    slabtest(SLABTEST_INJECT); // T03: harness tang object
+#endif
     printk("free pages after slab test: %lu\n", kfreepage_count());
     kvminit();          // create kernel page table
     kvminithart();      // turn on paging
