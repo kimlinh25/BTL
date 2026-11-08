@@ -1,0 +1,5 @@
+Revision: 578b89f
+7.2.6
+riscv64-linux-gnu-gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0
+QEMU emulator version 8.2.0
+riscv64-unknown-elf-gcc () 10.2.0

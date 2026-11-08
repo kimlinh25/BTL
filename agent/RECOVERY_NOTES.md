@@ -4,7 +4,7 @@ Cập nhật bổ sung 09/11/2026 — W04 và conflict PR #35.
 
 - Đã tạo và xác minh [tuần #36](https://github.com/kimlinh25/BTL/issues/36) / milestone3 / Project https://github.com/users/kimlinh25/projects/1. Linh P05 #37; Minh tiếp tục S03a #27, sau đó S04a #38 nếu đạt và còn giờ; Khánh tiếp tục T03 #28; cả nhóm chốt W03 #29 và tổng hợp W04 #39. Giữ ID và cha W03 của #27/#28/#29; task mới #37/#38/#39 là con #36. Đã kiểm tra 30 điều kiện API về assignee, status, tuần, ngày, reviewer, milestone và quan hệ. Evidence: C:/Users/KimSakota/.codex/tmp/BTL-W04-tasks-20261109/verification.json.
 - Hạn nội bộ #27/#28: PR sửa 11/11, chốt 12/11; #29:10/11; #37/#38:14/11; #39:15/11. Quỹ 10–12 giờ/người gồm học/review/báo cáo; mỗi người xác nhận khi nhận việc. Main9d6d145 đã merge PR32/33/34 nhưng object bản ghép 08/11 vẫn15/2; chưa có fix slab/test mới trong PR35. W04 ưu tiên tồn đọng và P05, S04a có điều kiện; class client/reclaim và file/inode/buf xem lại từ W05.
-- Linh vừa yêu cầu khắc phục conflict. Local `update`@3d86914 có hai file agent unmerged khi khôi phục stash; PR35 cũng conflict hai file này với main. Backup index, đủ stage blobs và working files: C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/. Giữ toàn bộ nội dung main và ghi chú W03 mới; Linh đã cho phép rõ ngày 09/11: stage hai tệp agent, commit bản hòa, ghép main và push nhánh update; chưa cho phép merge PR vào main hoặc commit báo cáo Word. Báo cáo W03 chưa track giữ nguyên, chưa nhận đã nộp. Không sửa C/h/S.
+- Linh vừa yêu cầu khắc phục conflict. Lúc bắt đầu, local `update`@3d86914 có hai file agent unmerged khi khôi phục stash; PR35 cũng conflict hai file này với main. Backup index, đủ stage blobs và working files: C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/. Giữ toàn bộ nội dung main và ghi chú W03 mới; Linh đã cho phép rõ ngày 09/11: stage hai tệp agent, commit bản hòa, ghép main và push nhánh update; chưa cho phép merge PR vào main hoặc commit báo cáo Word. Báo cáo W03 chưa track giữ nguyên, chưa nhận đã nộp. Không sửa C/h/S.
 
 ## Ghi chú W03 đã lưu — các mục có ngày cũ là lịch sử
 
@@ -129,3 +129,7 @@ Các ghi chú dưới đây phản ánh lần sửa W01 ngày 23/10, không ph�
 - Chỉ một worktree BTL ổ D, không tạo thêm. Giữ repo VstHelper gốc và dirty work riêng; snapshot tham khảo đã có trên main.
 - Backup xử lý conflict cũ: C:/Users/KimSakota/.codex/backups/BTL-conflicts-20261023-aa7t56qa/. Stash65a2e92 gây xung đột đã sao lưu và bỏ; stash5221c62 cũ vẫn giữ, không áp lại khi không có yêu cầu.
 - Người dùng tự viết C và tự commit/push bài học theo AGENTS.md. Quyền tự commit/push trước đây chỉ cho lần sửa Git/ảnh, không tự mở rộng sang báo cáo hoặc bài code mới.
+
+## Ghi nhận hòa nhánh — 09/11/2026
+
+- Theo quyền Linh vừa xác nhận, bản hòa hai tệp đã commit tại `85b1418`. Khi ghép `origin/main`9d6d145, giữ nội dung đã đối chiếu của hai tệp này; implementation trong merge phải trùng hoàn toàn main. Chỉ push nhánh `update` để cập nhật PR #35, không merge PR vào main. Báo cáo W03 giữ ngoài commit; không chạy lại kernel vì đây là sửa tài liệu/bộ nhớ và nhận lại code main đã có. Kết quả push/PR kiểm tra sau thao tác lưu tại C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/publication-verification.json.

@@ -8,6 +8,7 @@ OBJS = \
   $K/printk.o \
   $K/uart.o \
   $K/kalloc.o \
+  $K/slab.o \
   $K/spinlock.o \
   $K/string.o \
   $K/main.o \
@@ -64,6 +65,10 @@ OBJDUMP = $(TOOLPREFIX)objdump
 DETFLAGS = "-ffile-prefix-map=$(CURDIR)=."
 
 CFLAGS = -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2
+SLAB_TEST_CASE ?= normal
+ifneq ($(SLAB_TEST_CASE),normal)
+CFLAGS += -DSLAB_TEST_CASE=$(SLAB_TEST_CASE)
+endif
 CFLAGS += $(DETFLAGS)
 CFLAGS += -march=rv64gc
 CFLAGS += -std=gnu99
@@ -78,6 +83,18 @@ CFLAGS += -fno-builtin-free
 CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
 CFLAGS += -I.
+ifdef KALLOCTEST
+OBJS += $K/kalloctest.o
+KALLOCTEST_INJECT ?= 0
+CFLAGS += -DKALLOCTEST -DKALLOCTEST_INJECT=$(KALLOCTEST_INJECT)
+CFLAGS += -DKT_CPUS=$(or $(CPUS),3) -DKT_REV=\"$(shell git describe --always --dirty 2>/dev/null)\"
+endif
+ifdef SLABTEST
+OBJS += $K/slabtest.o
+SLABTEST_INJECT ?= 0
+CFLAGS += -DSLABTEST -DSLABTEST_INJECT=$(SLABTEST_INJECT)
+CFLAGS += -DST_CPUS=$(or $(CPUS),3) -DST_REV=\"$(shell git describe --always --dirty 2>/dev/null)\"
+endif
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)

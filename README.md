@@ -1,5 +1,8 @@
 # BTL: Slab allocator and per-CPU free lists trên xv6
 
+> Nhóm làm tiếp trên **kimlinh25/BTL** từ 07/11/2026. Xem [hướng dẫn repo tạm và quay về tài khoản cũ](docs/GitHub-tam-thoi.md).
+
+
 Đề tài 19, mã dự án 26118, môn Hệ điều hành. Nhóm: Nguyễn Kim Linh (20233495), Lê Trần Hiếu Minh (20233528), Nguyễn An Khánh (20224019).
 
 ## Bắt đầu làm việc nhóm

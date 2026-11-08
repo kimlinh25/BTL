@@ -62,6 +62,9 @@ void            kfree(void *);
 void            kinit(void);
 uint64          kfreepage_count(void); // Returns the number of free pages in the physical memory.
 
+// kalloctest.c
+void            kalloctest(int);
+
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
@@ -185,3 +188,12 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
+
+// slab.c
+void            kmalloc_init(void);
+void*           kmalloc(uint64 size);
+void            kmfree(void *ptr);
+void            slab_test(void);
+
+// slabtest.c
+void            slabtest(int);

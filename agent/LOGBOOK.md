@@ -1,6 +1,25 @@
 # Nhật ký dự án
 
-Cập nhật: 23/10/2026. Lưu kết quả có ý nghĩa; transcript nằm riêng trong `history/`.
+Cập nhật: 31/10/2026. Lưu kết quả có ý nghĩa; transcript nằm riêng trong `history/`.
+
+## L033 - 31/10/2026 - Hoàn thiện và kiểm chứng Slab W02
+
+- request: Linh yêu cầu làm theo `docs/w02_check.md`, sau đó cập nhật file checklist và nhờ kiểm tra lại.
+- branch sync: Đã fetch `origin/main` tại `13c39f3` và phát hiện xung đột ở CURRENT_STATE/RECOVERY_NOTES. WIP được giữ trong `stash@{0}` trước khi merge; nội dung main về W02/P02 được giữ, phần slab được nối vào. Commit merge `3a9612c` do Minhlth tạo khi phiên trước bị ngắt; lượt này chỉ làm việc trên WIP sau merge, không commit/push. Snapshot pre-merge vẫn còn ở stash.
+- code: `main()` gọi `kmalloc_init()` và kế tiếp `slab_test()` sau `kinit()`. Test helper không tự init lại cache. `slab_test()` kiểm tra boundary/NULL, căn lề 8 byte, LIFO reuse, pattern, cấp phát slab thứ hai và fault-injected OOM/retry. Makefile có `SLAB_TEST_CASE=1/2/3` để chạy riêng double-free, misaligned pointer và non-slab pointer panic tests.
+- documentation: Viết lại `docs/slab_allocator_design.md` để khớp embedded freelist, header 32B, stride 64B, capacity 63, alignment 8B, API/failure paths và kết quả kiểm thử. Checklist `docs/w02_check.md` hiện untracked và kết thúc ngay sau mục `make fmt`/`git diff --check`; chưa tự sửa file checklist.
+- verification: `make fmt`, `git diff --check`, `clang-format --dry-run --Werror kernel/main.c kernel/slab.c` đạt. `make clean && make TOOLPREFIX=riscv64-linux-gnu- kernel/kernel fs.img` đạt. QEMU normal boot in `slab_test: ALL PASSED (capacity=63, obj_size=64)` và tiến tới shell. `./test-xv6.py usertests` in `ALL TESTS PASSED`; `./test-xv6.py crash` qua log recovery và hai orphan recovery. Các build panic riêng lần lượt in expected: `panic: kmfree: double free detected`, `panic: kmfree: unaligned slot pointer`, `panic: kmfree: invalid slab magic or corrupted header`.
+- status: Không có conflict marker/unmerged file sau merge. Branch local `codex/slab-allocator_page` có hai commit ahead upstream tại lần đọc cuối; source/docs WIP còn modified và `docs/w02_check.md` untracked. Không stage/commit/push thay Linh. Slab chưa được tích hợp vào client kernel; test hiện là boot test.
+- limits: Checklist hiện tại chỉ liệt kê format/whitespace trong phần mục 4 rồi kết thúc; chưa có yêu cầu log/CI tiếp theo trong nội dung file đang đọc. CI `git diff --exit-code` không được tuyên bố pass vì WIP có thay đổi mong muốn.
+
+## L032 - 31/10/2026 - Sửa lỗi build slab và kiểm tra CI local
+
+- request: Linh yêu cầu chạy check/test và hỗ trợ sửa lỗi từ ảnh CI đang dừng ở `make fmt && git diff --exit-code`; sau đó yêu cầu chạy kiểm tra lại.
+- context: Nhánh local `codex/slab-allocator_page`, HEAD `8241d43`; trước khi sửa, working tree đã có thay đổi định dạng trong `kernel/slab.c`. Giữ các thay đổi đó, không stage/commit/push.
+- diagnosis: Sau khi build với `TOOLPREFIX=riscv64-linux-gnu-`, trình biên dịch báo `printf` implicit declaration trong `slab_test()`. Kernel cung cấp `printk()` qua `defs.h`, không phải `printf()`.
+- repair: Đổi hai thông báo trong `slab_test()` sang `printk()`. Không gọi `slab_test()` trong `main()` vì lựa chọn boot/integration chưa được yêu cầu; hiện helper chưa được gọi và các bài `usertests`/`crash` không kiểm tra allocator này.
+- verification: Lần đầu `make -o /usr/lib/gcc/riscv64-unknown-elf/13.2.0/include/stdarg.h TOOLPREFIX=riscv64-linux-gnu- -B kernel/kernel fs.img` hoàn tất với exit 0. Lần chạy lại, `make fmt` chạy hai lần; `clang-format --dry-run --Werror kernel/slab.c` và `git diff --check` đều đạt. `make kernel/kernel fs.img` báo cả hai target up to date (binary đã build thành công ở lượt đầu). `./test-xv6.py usertests` in `ALL TESTS PASSED`; `./test-xv6.py crash` qua log recovery, orphan recovery và in `OK` cho cả hai test orphan. Sau kiểm tra đã dừng QEMU process còn sót do script và file FUSE tạm biến mất; không còn artifact đó trong status.
+- limits: `make fmt && git diff --exit-code` nguyên dạng không được xác nhận pass vì worktree có thay đổi code/docs có chủ đích. Formatter ổn định được kiểm tra bằng lần chạy lặp, dry-run file slab và whitespace check. CI usertests/crash không gọi `slab_test()`; chưa có runtime test trực tiếp cho slab. Lệnh build mặc định local trước đó chọn toolchain `unknown-elf` và bị dependency `.d` cũ trỏ tới header không tồn tại; build thành công khi ép toolchain Linux và bỏ qua prerequisite đó.
 
 ## L031 - 23/10/2026 - Gỡ xung đột local và giữ đúng hai ảnh minh chứng
 

@@ -2,13 +2,13 @@
 
 Cập nhật: 09/11/2026. Checkpoint này là hiện trạng; các mục bên dưới giữ làm lịch sử theo ngày.
 
-## W04 đã tạo trên GitHub; chuẩn bị giải quyết conflict PR #35
+## W04 đã tạo trên GitHub; hòa nội dung và ghép main cho PR #35
 
 - Theo yêu cầu Linh, đã tạo tuần W04 (09–15/11): [Issue cha #36](https://github.com/kimlinh25/BTL/issues/36), milestone #3 trên kimlinh25/BTL và cập nhật Project 1. Task mới: Linh P05 #37; Minh S04a #38 (chỉ sau #27 đạt và còn giờ); cả nhóm D01-W04 #39. Giữ #27 Minh / #28 Khánh / #29 cả nhóm khi chuyển tiếp, không tạo bản sao.
 - Hạn nội bộ: #27/#28 PR sửa 11/11, chốt 12/11; #29 bổ sung minh chứng W03 10/11; P05 thiết kế 10/11, PR 12/11, log 14/11; S04a target 14/11 có điều kiện; báo cáo W04 15/11. Quỹ kế hoạch 10–12 giờ/người đã xác nhận trước đây, gồm học/review/báo cáo; assign chưa là xác nhận nhận việc.
 - Đã gán đúng assignees và kiểm tra lại 30 điều kiện API: week W04, status, ngày, reviewer, milestone và cha–con. #37/#38/#39 là con #36; #26–#29 vẫn là con W03 #25. #27/#28 chuyển milestone W04; #29 giữ milestone W03 vì chốt báo cáo W03 nhưng có nhãn/tuần W04 để theo dõi phần bổ sung. Evidence: C:/Users/KimSakota/.codex/tmp/BTL-W04-tasks-20261109/verification.json.
 - Main GitHub tại lần đọc 09/11 vẫn 9d6d145; PR #32/#33/#34 đã merge, object bản ghép 08/11 vẫn 15 PASS/2 FAIL. PR #35 `update`@3d86914 chỉ tài liệu/bộ nhớ W01–W02, chưa có fix slab/test. Không gọi lõi toàn PASS hoặc P05/S04a đã làm. Tồn đọng #27: fill 0/1, panic modes và thiết kế; #28: biên/mixed 64/128, capacity theo từng class, matrix/log. W04 ưu tiên lõi và P05; class client/reclaim và file/inode/buf xem lại từ W05, giảm dự phòng so với lịch cũ.
-- Linh vừa yêu cầu khắc phục conflict PR. Local đang `update`@3d86914, origin/main9d6d145; hai file agent bị unmerged khi khôi phục stash, không có MERGE_HEAD. `git merge-tree` còn xác nhận PR #35 xung đột đúng hai file này với main. Đã backup working files, index và đủ ba stage blobs tại C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/.
+- Linh vừa yêu cầu khắc phục conflict PR. Lúc bắt đầu sửa, local là `update`@3d86914, origin/main9d6d145; hai file agent bị unmerged khi khôi phục stash, không có MERGE_HEAD. `git merge-tree` còn xác nhận PR #35 xung đột đúng hai file này với main. Đã backup working files, index và đủ ba stage blobs tại C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/.
 - Chọn bản stage3 vì đối chiếu cho thấy nó giữ nguyên toàn bộ main và chỉ thêm 157 dòng checkpoint W03; không bỏ ghi chú mới để lấy snapshot cũ 24/10. Bổ sung checkpoint W04 này. Ngày 09/11 Linh đã cho phép rõ stage hai tệp agent, commit bản hòa, ghép main và push riêng nhánh update để cập nhật PR #35; quyền này không mở rộng sang merge PR vào main hoặc commit báo cáo Word. Giữ nguyên báo cáo W03 chưa track, stash và implementation C/h/S.
 
 
@@ -182,3 +182,7 @@ Cập nhật: 31/10/2026.
 - Cách giảng viên định lượng sai khác 25% và cumulative progress; quy ước nội bộ trong tài liệu chỉ là đề xuất.
 - Cách môn học tính ít nhất 3 cấu trúc kernel chuyển động và quy định tên API cuối.
 - Hiệu quả của batch stealing/adaptive policy chỉ có thể kết luận sau thực nghiệm.
+
+## Ghi nhận hòa nhánh — 09/11/2026
+
+- Theo quyền Linh vừa xác nhận, bản hòa hai tệp đã commit tại `85b1418`. Khi ghép `origin/main`9d6d145, giữ nội dung đã đối chiếu của hai tệp này; implementation trong merge phải trùng hoàn toàn main. Chỉ push nhánh `update` để cập nhật PR #35, không merge PR vào main. Báo cáo W03 giữ ngoài commit; không chạy lại kernel vì đây là sửa tài liệu/bộ nhớ và nhận lại code main đã có. Kết quả push/PR kiểm tra sau thao tác lưu tại C:/Users/KimSakota/.codex/tmp/BTL-PR35-conflict-20261109/publication-verification.json.

@@ -1,104 +1,132 @@
-# Bản Thiết Kế Kỹ Thuật: Cấu Trúc Quản Lý Bộ Nhóm (Slab Allocator - Single Class)
+# Thiết kế Slab Allocator một size class
 
-Bản thiết kế này quy định chi tiết cấu trúc dữ liệu, sơ đồ bố trí bộ nhớ (metadata/slots), cơ chế tính toán sức chứa (capacity), căn lề (alignment), quy trình khởi tạo (`init`) và các nhánh xử lý lỗi (`failure path`) cho một bộ cấp phát bộ nhớ dạng Slab (tương thích mô hình NoGC / Memory Pool hiệu năng cao).
+Tài liệu này mô tả implementation hiện tại trong `kernel/slab.c`. Đây là một cache
+cho object có kích thước tối đa 64 byte, dùng trang 4 KiB do page allocator của
+xv6 cung cấp. Các trang slab dùng một freelist chung được bảo vệ bởi một spinlock;
+per-CPU cache, nhiều size class và thu hồi trang slab chưa được triển khai.
 
----
+## Bố trí một trang slab
 
-## 1. Tổng Quan Kiến Trúc (Architecture Overview)
-
-Slab Allocator là một chiến lược cấp phát bộ nhớ dựa trên việc chia nhỏ một khối bộ nhớ lớn (gọi là một *Page* hoặc *Slab Buffer*) thành nhiều ô nhỏ có kích thước cố định bằng nhau gọi là *Slot* (hoặc *Object*). Thiết kế này hướng tới việc loại bỏ hoàn toàn phân mảnh ngoại vi, đạt độ phức tạp thời gian cấp phát/thu hồi là $\mathcal{O}(1)$ và tối ưu hóa bộ nhớ đệm (Cache-friendly).
-
-### Các Thuộc Tính Cốt Lõi:
-* **Object Size ($S$):** Kích thước của một đối tượng dữ liệu do người dùng yêu cầu.
-* **Alignment ($A$):** Yêu cầu căn lề bộ nhớ của đối tượng (thường là $8$-byte hoặc $16$-byte).
-* **Page Size ($P$):** Kích thước tổng cộng của một trang bộ nhớ (ví dụ: chuẩn phần cứng $4096\text{ bytes}$).
-
----
-
-## 2. Sơ Đồ Bố Trí Bộ Nhớ (Metadata & Slots Layout)
-
-Bộ nhớ của một Slab được chia thành hai phần rõ rệt: **Metadata (Vùng quản lý)** nằm ở phần đầu tiên của trang và **Slots (Vùng chứa dữ liệu)** chiếm phần không gian còn lại.
+Mỗi trang bắt đầu bằng header 32 byte. Phần còn lại chứa 63 slot, mỗi slot có
+stride 64 byte:
 
 ```text
-[ Slab Buffer (Tổng kích thước P = 4096 bytes) ]
-+-------------------------------------------------------------------------+
-| METADATA (Cố định ở đầu Slab)                                          |
-| - magic (4 bytes)       - object_size (2 bytes)  - total_slots (2 bytes)|
-| - free_count (2 bytes)  - first_free_index (2 bytes)                    |
-| - padding / alignment padding to reach alignment boundary               |
-+-------------------------------------------------------------------------+
-| PADDING / ALIGNMENT GAP (Đảm bảo Slots bắt đầu tại địa chỉ chia hết cho A)|
-+-------------------------------------------------------------------------+
-| SLOTS AREA (Vùng chứa dữ liệu / danh sách liên kết các ô trống)        |
-| ┌─────────────────────────────────────────────────────────────────────┐ |
-| | Slot 0: [ Dữ liệu đối tượng HOẶC con trỏ chỉ tới slot trống kế tiếp ] | |
-| ├─────────────────────────────────────────────────────────────────────┤ |
-| | Slot 1: [ Dữ liệu đối tượng / Con trỏ next ]                        | |
-| ├─────────────────────────────────────────────────────────────────────┤ |
-| | Slot 2: [ Dữ liệu đối tượng / Con trỏ next ]                        | |
-| ├─────────────────────────────────────────────────────────────────────┤ |
-| | ...                                                                 | |
-| └─────────────────────────────────────────────────────────────────────┘ |
-+-------------------------------------------------------------------------+
+Một trang vật lý: 4096 bytes
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Header: 32 bytes                                                        │
+├──────────────────┬──────────────────┬─────────────────────┬─────────────┤
+│ Slot 0: 64 bytes  │ Slot 1: 64 bytes │ ... Slot 62: 64 bytes│ 32B dư cuối │
+└──────────────────┴──────────────────┴─────────────────────┴─────────────┘
 ```
 
-### Chi Tiết Cấu Trúc Metadata (`struct SlabHeader`):
-1. `uint32_t magic`: Mã nhận diện tính hợp lệ của Slab (ví dụ: `0x514C4142` tương ứng chữ "SLAB").
-2. `uint16_t object_size`: Kích thước thực tế của mỗi slot.
-3. `uint16_t total_slots`: Tổng số lượng slot có trong Slab này.
-4. `uint16_t free_count`: Số lượng slot hiện đang trống (chưa được cấp phát).
-5. `int16_t first_free_index`: Chỉ số (index) của slot trống đầu tiên trong danh sách liên kết nội bộ (Free List). Nếu bằng `-1`, Slab đã đầy.
+Header `struct slab_header` trong mã gồm:
 
----
+| Trường | Kích thước | Vai trò |
+|---|---:|---|
+| `magic` | 4 bytes | Dấu nhận diện trang slab (`SLAB_MAGIC`) |
+| `obj_size` | 2 bytes | Stride của slot, hiện là 64 bytes |
+| `capacity` | 2 bytes | Tổng số slot, hiện là 63 |
+| `free_count` | 2 bytes | Số slot trống trên trang |
+| `_pad` | 2 bytes | Đệm tường minh |
+| `_reserved` | 4 bytes | Dự phòng |
+| `freelist` | 8 bytes | Slot trống đầu tiên của trang |
+| `next` | 8 bytes | Trang kế tiếp trong danh sách của cache |
 
-## 3. Tính Toán Sức Chứa (Capacity) và Căn Lề (Alignment)
+Tổng kích thước là 32 bytes. `struct slab_slot` chỉ chứa một con trỏ `next`;
+khi slot đang trống, con trỏ này được lưu ngay trong 8 byte đầu của slot. Khi
+slot được cấp phát, vùng đó thuộc về dữ liệu object và không còn là freelist.
 
-Việc tính toán dung lượng (`capacity` tức `total_slots`) phải tuân thủ nghiêm ngặt các quy tắc căn lề phần cứng để tránh lỗi truy cập bộ nhớ trên các kiến trúc như RISC-V hoặc x86_64.
+## Alignment và capacity
 
-### Công Thức Căn Lề (Alignment):
-Đối tượng có kích thước $S$ phải được căn lề theo bội số của $A$. Kích thước hiệu chỉnh của một slot ($S_{aligned}$) được tính bằng:
-$$S_{aligned} = \left( \frac{S + A - 1}{A} \right) \times A$$
+Trang do `kalloc()` trả về căn theo `PGSIZE` (4096 bytes). Header dài 32 bytes,
+do đó vùng slot bắt đầu ở địa chỉ căn 8 byte. `kmalloc_init()` chọn class 64
+bytes và căn stride lên bội số 8:
 
-### Công Thức Tính Sức Chứa ($N$ - Total Slots):
-Giả sử kích thước tổng cộng của trang là $P$ (ví động $4096$ bytes) và kích thước phần metadata cố định là $M$ (ví dụ $16$ bytes):
-1. Không gian khả dụng cho dữ liệu: $D = P - M$.
-2. Số lượng slot tối đa tính toán lý thuyết: 
-   $$N = \left\lfloor \frac{D}{S_{aligned}} \right\rfloor$$
-3. Kiểm tra ràng buộc tràn bộ nhớ: Đảm bảo rằng $M + (N \times S_{aligned}) \le P$. Nếu dư thừa dung lượng cuối trang, phần dư đó được tính là khoảng đệm cuối (tail padding) và không được phân bổ cho slot nào.
+```text
+stride   = ALIGN_UP(max(64, sizeof(struct slab_slot)), 8) = 64 bytes
+capacity = (PGSIZE - sizeof(struct slab_header)) / stride
+         = (4096 - 32) / 64 = 63 slots
+tail     = 4096 - 32 - 63 * 64 = 32 bytes
+```
 
----
+Phần dư 32 byte cuối trang không tạo thành slot. Một yêu cầu có size từ 1 đến
+64 byte nhận một slot 64 byte; size 0 hoặc lớn hơn 64 bị từ chối.
 
-## 4. Quy Trình Khởi Tạo (`init` Path)
+## Khởi tạo allocator và trang slab
 
-Khi một Slab mới được cấp phát từ hệ thống, hàm khởi tạo (`Slab_Init`) thực hiện các bước sau:
+Sau khi `kinit()` tạo page allocator, `main()` gọi `kmalloc_init()` đúng một lần
+để khởi tạo spinlock và cấu hình size class/capacity. Sau đó `slab_test()` chạy
+trên cache đã khởi tạo; nó không tự khởi tạo lại allocator.
 
-1. **Kiểm tra tham số đầu vào (Validation):**
-   * Đảm bảo con trỏ bộ nhớ trang `void* raw_mem` khác `NULL`.
-   * Kiểm tra $S > 0$ và yêu cầu căn lề $A$ là lũy thừa của $2$ ($1, 2, 4, 8, 16,...$).
-   * Kiểm tra xem $P$ có đủ chứa ít nhất $1$ slot hay không ($P \ge \text{Header Size} + S_{aligned}$).
-2. **Thiết lập Header (Metadata):**
-   * Ghi giá trị `magic`, `object_size`, và `total_slots` vào vùng nhớ đầu tiên.
-   * Đặt `free_count = total_slots` và `first_free_index = 0`.
-3. **Xây dựng Free List nội bộ (Embedded Free List):**
-   * Duyệt qua từng slot từ $i = 0$ đến $N - 1$.
-   * Tại mỗi slot, tận dụng chính vùng nhớ của slot đó để lưu chỉ số của slot trống kế tiếp (`int16_t next_free`).
-   * Slot cuối cùng được gán giá trị liên kết là `-1` (đánh dấu kết thúc danh sách).
+Khi cache cần slot nhưng chưa có slab còn chỗ, `slab_page_create()` gọi
+`kalloc()` để lấy trang. Hàm thiết lập header rồi duyệt các slot để nối chúng
+thành embedded freelist. Cache liên kết trang mới vào đầu danh sách `slabs`.
+Nếu `kalloc()` hết trang, trang mới không được tạo.
 
----
+## Allocate và free
 
-## 5. Đường Dẫn Xử Lý Lỗi (`Failure Path`)
+`kmalloc(size)` trả về `0` khi size không hợp lệ hoặc không lấy được trang do
+OOM. Nếu hợp lệ, hàm lấy lock cache, tìm trang còn slot trống hoặc tạo trang
+mới, lấy phần tử đầu freelist và giảm `free_count`. Sau khi nhả lock, toàn bộ
+slot 64 byte được zero trước khi trả về cho caller.
 
-Trong môi trường hệ điều hành hoặc hệ thống nhúng, việc xử lý lỗi (Failure path) phải được thiết kế tường minh để tránh rò rỉ bộ nhớ hoặc gây trạng thái treo hệ thống (Kernel Panic):
+`kmfree(NULL)` là no-op. Với con trỏ khác NULL, hàm kiểm tra địa chỉ thuộc vùng
+RAM hợp lệ, header của trang có magic/size hợp lệ, con trỏ nằm đúng đầu một
+slot, và slot chưa có trong freelist. Con trỏ không hợp lệ, double-free hoặc
+counter không hợp lệ dẫn tới `panic()`. Slot được ghi mẫu byte `1`, nối vào đầu
+freelist của trang và tăng `free_count`.
 
-* **Lỗi 1: Tham số không hợp lệ (`EINVAL` / Invalid Arguments)**
-  * *Điều kiện:* `raw_mem == NULL`, $S == 0$, hoặc $A$ không phải lũy thừa của 2.
-  * *Hành động:* Hàm `init` trả về mã lỗi trực tiếp, không ghi đè bất kỳ vùng nhớ nào, đảm bảo tính an toàn dữ liệu.
-* **Lỗi 2: Trang quá nhỏ không chứa nổi metadata hoặc 1 slot (`ENOMEM` / Out of Memory Space)**
-  * *Điều kiện:* $P < \text{sizeof(SlabHeader)} + S_{aligned}$.
-  * *Hành động:* Hủy bỏ tiến trình khởi tạo Slab, trả về con trỏ trạng thái lỗi, yêu cầu gọi cấp phát trang có kích thước lớn hơn.
-* **Lỗi 3: Tràn bộ nhớ khi cấp phát (`Allocation Failure` khi Slab đầy)**
-  * *Điều kiện:* Khi gọi hàm cấp phát đối tượng từ Slab mà `free_count == 0` hoặc `first_free_index == -1`.
-  * *Hành động:* Trả về `NULL` ngay lập tức để tầng quản lý cấp cao hơn (như Memory Pool Manager) biết đường chuyển sang cấp phát một Slab mới hoặc kích hoạt cơ chế dọn dẹp.
+Các trang slab hiện không được trả lại page allocator khi rỗng. Kiểm tra
+double-free duyệt freelist nên thời gian free phụ thuộc số slot trống trên
+trang; không khẳng định mọi thao tác allocator là O(1).
 
----
-*Bản thiết kế này sẵn sàng làm cơ sở để hiện thực hóa thành mã nguồn C/C++ chuẩn xác cho Đề tài quản lý bộ nhớ.*
+## Tự kiểm thử lúc khởi động
+
+`main()` gọi `kmalloc_init()` và ngay sau đó `slab_test()`, sau khi `kinit()` đã
+hoàn tất. Test kiểm tra size biên và `kmfree(NULL)`, căn lề 8 byte, LIFO reuse,
+ghi/đọc pattern trên slab thứ nhất, cấp đủ slot để buộc tạo slab thứ hai, và
+giải phóng các object sau kiểm tra.
+
+Để thử lỗi cấp trang mà không làm cạn RAM thật, boot test bật một cờ nội bộ để
+lần tạo slab tiếp theo trả về OOM. Nó xác nhận `kmalloc()` trả về `0`, sau đó
+tắt cờ và retry để xác nhận lock đã được nhả và cấp phát lại thành công. Đây là
+fault injection cho nhánh xử lý OOM, không phải kiểm tra cạn toàn bộ RAM.
+
+Mặc định build chạy bộ test bình thường. Các ca kết thúc có chủ đích bằng panic
+có thể chạy riêng bằng `SLAB_TEST_CASE`:
+
+| Giá trị | Ca kiểm thử | Panic mong đợi |
+|---:|---|---|
+| `1` | Double-free cùng object | `kmfree: double free detected` |
+| `2` | Free con trỏ lệch 1 byte trong object | `kmfree: unaligned slot pointer` |
+| `3` | Free trang thô không phải slab | `kmfree: invalid slab magic or corrupted header` |
+
+Mỗi ca chạy toàn bộ test bình thường trước, in dòng `ALL PASSED`, sau đó chạy
+ca âm riêng và phải panic ở thông báo tương ứng. Build một ca riêng bằng:
+
+```sh
+make clean
+make TOOLPREFIX=riscv64-linux-gnu- SLAB_TEST_CASE=1 kernel/kernel fs.img
+make TOOLPREFIX=riscv64-linux-gnu- qemu
+```
+
+Đổi `SLAB_TEST_CASE` thành `2` hoặc `3` để chạy ca khác. Xác nhận từng kết quả
+panic rồi build lại chế độ mặc định trước khi chạy các bài test khác.
+
+Đã kiểm tra local ngày 31/10/2026 sau `make clean`:
+
+| Ca | Expected | Actual |
+|---|---|---|
+| Normal boot | `slab_test: ALL PASSED (capacity=63, obj_size=64)` | Đúng; QEMU tiếp tục tới shell |
+| `SLAB_TEST_CASE=1` | `panic: kmfree: double free detected` | Đúng |
+| `SLAB_TEST_CASE=2` | `panic: kmfree: unaligned slot pointer` | Đúng |
+| `SLAB_TEST_CASE=3` | `panic: kmfree: invalid slab magic or corrupted header` | Đúng |
+
+Nếu mọi điều kiện bình thường qua, console in:
+
+```text
+slab_test: ALL PASSED (capacity=63, obj_size=64)
+```
+
+Đây là test khởi động cho slab; `usertests` và `crash` của xv6 không thay thế
+cho test này.

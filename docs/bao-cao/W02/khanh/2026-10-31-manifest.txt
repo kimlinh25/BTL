@@ -1,0 +1,7 @@
+Nguoi chay: Nguyen An Khanh (ankhanh2594)
+Ngay: 2026-10-31
+Revision: 8d9d2bf
+OS: Ubuntu 22.04, kernel 7.2.6
+riscv64-unknown-elf-gcc () 10.2.0
+QEMU emulator version 8.2.0
+Lenh: make clean; make qemu CPUS=1 KALLOCTEST=1 [KALLOCTEST_INJECT=0|1|2]
