@@ -53,6 +53,7 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int id; // CPU id
 
   if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -61,17 +62,20 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run *)pa;
+  push_off();   // Tắt ngắt để tránh bị preempted
+  id = cpuid(); // Lấy CPU id hiện tại
 
   acquire(
-    &kmem[0]
+    &kmem[id]
        .lock); // Yêu cầu quyền truy cập vào kmem.lock để đảm bảo rằng không có CPU nào khác đang truy cập vào freelist cùng lúc
 
-  r->next = kmem[0].freelist;
-  kmem[0].freelist = r;
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
 
   release(
-    &kmem[0]
+    &kmem[id]
        .lock); // Giải phóng quyền truy cập vào kmem.lock để cho phép các CPU khác truy cập vào freelist
+  pop_off();   // Bật lại ngắt
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -81,15 +85,37 @@ void *
 kalloc(void)
 {
   struct run *r;
+  int id; // CPU id
+
+  push_off();   // Tắt ngắt để tránh bị preempted
+  id = cpuid(); // Lấy CPU id hiện tại
 
   // Giữ khóa khi nối trang trả về vào freelist
-  acquire(&kmem[0].lock);
+  acquire(&kmem[id].lock);
 
-  r = kmem[0].freelist;
+  r = kmem[id].freelist;
   if (r)
-    kmem[0].freelist = r->next;
+    kmem[id].freelist = r->next;
 
-  release(&kmem[0].lock);
+  release(&kmem[id].lock);
+
+  // Nếu không tìm thấy trang trong freelist của CPU hiện tại, thử tìm kiếm trong freelist của các CPU khác
+  if (!r)
+    for (int donor = 0; donor < NCPU; donor++) {
+      if (donor == id)
+        continue; // Bỏ qua CPU hiện tại
+
+      acquire(&kmem[donor].lock);
+      r = kmem[donor].freelist;
+      if (r)
+        kmem[donor].freelist = r->next;
+      release(&kmem[donor].lock);
+
+      if (r)
+        break; // Nếu tìm thấy trang, thoát khỏi vòng lặp
+    }
+
+  pop_off(); // Bật lại ngắt
 
   if (r)
     memset((char *)r, 5, PGSIZE); // fill with junk
