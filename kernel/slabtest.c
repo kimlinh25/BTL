@@ -1,4 +1,4 @@
-// T03: harness kiem thu tang object (kmalloc/kmfree), hop dong slab64.
+// T03: harness kiem thu tang object (kmalloc/kmfree), hop dong slab64/128.
 // Chay tren CPU 0 ngay sau slab_test(), truoc khi cac CPU khac khoi dong.
 // Khong goi lai kmalloc_init(). Cache co the da giu san trang slab trong
 // do slab_test() tao ra, nen harness chi so voi so dem luc bat dau.
@@ -26,23 +26,26 @@
 #define ST_CPUS 0
 #endif
 
-#define ST_CONTRACT "slab64"
+#define ST_CONTRACT "slab64/128"
 #define ST_MAGIC    0x534C4142U
 #define ST_HDR      32  // kich thuoc header slab (S01)
-#define ST_N        200 // so object song cung luc: hon 3 trang 63 slot
+#define ST_N        200 // so object song cung luc, tron hai class
 #define ST_CYCLES   5   // so chu ky do sau warm-up (O06)
 #define ST_NSTASH   8   // so o cat object that bi thay the khi inject
 
 extern char end[]; // dia chi dau tien sau kernel (kernel.ld)
 
-// Bang bien theo hop dong hien tai: 1 = phai cap duoc, 0 = phai tra 0.
+// Bang bien theo hop dong hien tai: obj_size cua class phai nhan size do,
+// 0 = kmalloc phai tra 0.
 static struct {
   uint64 size;
-  int ok;
-} st_bounds[] = {{0, 0}, {1, 1}, {64, 1}, {65, 0}, {128, 0}, {129, 0}};
+  uint64 cls;
+} st_bounds[] = {{0, 0},     {1, 64},    {64, 64}, {65, 128},
+                 {127, 128}, {128, 128}, {129, 0}};
 
-// Kich thuoc yeu cau cua workload, lap vong theo chi so object
-static uint64 st_sizes[] = {1, 8, 13, 32, 63, 64};
+// Kich thuoc yeu cau cua workload, lap vong theo chi so object:
+// 6 size class64 va 4 size class128, nen ST_N object co ca hai class song.
+static uint64 st_sizes[] = {1, 8, 13, 32, 63, 64, 65, 100, 127, 128};
 #define ST_NSIZES (sizeof(st_sizes) / sizeof(st_sizes[0]))
 
 static int st_pass, st_fail;
@@ -52,6 +55,7 @@ static int st_dupfree;            // so lan buoc don chan free trung
 static char *st_obj[ST_N];        // dia chi kmalloc tra ve (co the sai)
 static uint64 st_sz[ST_N];        // kich thuoc da yeu cau
 static int st_own[ST_N];          // 1 = object hop le, duy nhat, dang so huu
+static int st_new[ST_N];          // 1 = object vua duoc cap lai trong O04
 static char *st_stash[ST_NSTASH]; // object that bi thay the, tra khi don
 
 // In ket qua 1 ca: so actual voi want, dem PASS/FAIL
@@ -95,6 +99,28 @@ st_valid(char *p, uint64 size)
     return 0;
   uint64 off = (uint64)(p - pg - ST_HDR);
   return (off % objsz) == 0 && (off / objsz) < cap;
+}
+
+// obj_size cua class phai nhan size theo hop dong: 1..64 -> 64, 65..128 -> 128
+static uint64
+st_want(uint64 size)
+{
+  return size <= 64 ? 64 : 128;
+}
+
+// obj_size ghi trong header trang chua p; chi goi khi st_valid(p) dung
+static uint64
+st_objsz(char *p)
+{
+  return *(uint16 *)((char *)PGROUNDDOWN((uint64)p) + 4);
+}
+
+// Object i duoc so huu: hop le va nam dung class theo size da xin
+static int
+st_ok(int i)
+{
+  return st_valid(st_obj[i], st_sz[i]) &&
+         st_objsz(st_obj[i]) == st_want(st_sz[i]);
 }
 
 // 1 neu vung [a, a+sa) chong len [b, b+sb)
@@ -150,22 +176,23 @@ st_byte(int i, int j)
   return (uchar)(0x40 + i * 7 + j);
 }
 
-// B01/B02: kich thuoc bien theo hop dong; object cap duoc thi tra ngay
+// B01/B02: kich thuoc bien theo hop dong; object cap duoc phai nam dung class
+// (actual = obj_size, 0 = NULL, 1 = con tro sai) va duoc tra ngay
 static void
 st_bounds_test(void)
 {
   for (int i = 0; i < sizeof(st_bounds) / sizeof(st_bounds[0]); i++) {
     uint64 sz = st_bounds[i].size;
     char *p = kmalloc(sz);
-    int got = p != 0;
-    int ok = st_bounds[i].ok ? st_valid(p, sz) : !got;
-    if (ok)
+    uint64 cls = st_bounds[i].cls;
+    uint64 got = p == 0 ? 0 : st_valid(p, sz) ? st_objsz(p) : 1;
+    if (got == cls)
       st_pass++;
     else
       st_fail++;
-    printk("KT|case=B01-size-%lu|expected=%s|want=%d|actual=%d|result=%s\n", sz,
-           st_bounds[i].ok ? "valid" : "null", st_bounds[i].ok, got,
-           ok ? "PASS" : "FAIL");
+    printk("KT|case=B01-size-%lu|expected=%s|want=%lu|actual=%lu|result=%s\n",
+           sz, cls ? "class_obj_size" : "null", cls, got,
+           got == cls ? "PASS" : "FAIL");
     if (st_valid(p, sz))
       kmfree(p);
   }
@@ -219,7 +246,7 @@ st_corrupt(void)
   st_obj[6] = st_obj[6] + 8; // gia lap dia chi lech khoi bien slot
 }
 
-// O01: moi object cap ra phai hop le; object hop le duoc danh dau so huu
+// O01: moi object cap ra phai hop le va dung class; object dat duoc so huu
 static void
 st_alloc_valid(void)
 {
@@ -231,7 +258,7 @@ st_alloc_valid(void)
   if (st_inject == 2)
     st_corrupt();
   for (int i = 0; i < ST_N; i++) {
-    st_own[i] = st_valid(st_obj[i], st_sz[i]);
+    st_own[i] = st_ok(i);
     good += st_own[i];
   }
   if (good != ST_N)
@@ -282,13 +309,25 @@ st_pattern(void)
   if (st_inject == 1)
     st_obj[3][0] ^= 0xFF; // gia lap ghi de, chi trong vung cua object 3
   for (int i = 0; i < ST_N; i++) {
-    int ok = st_valid(st_obj[i], st_sz[i]);
+    int ok = st_ok(i);
     for (int j = 0; ok && j < st_sz[i]; j++)
       if ((uchar)st_obj[i][j] != st_byte(i, j))
         ok = 0;
     good += ok;
   }
+  if (st_inject == 1)
+    st_obj[3][0] ^= 0xFF; // tra lai byte da dao o tren
   st_report("O03-pattern-rw", "objects_intact", good, ST_N, good == ST_N);
+}
+
+// 1 neu object i con dung mau st_byte
+static int
+st_intact(int i)
+{
+  for (int j = 0; j < st_sz[i]; j++)
+    if ((uchar)st_obj[i][j] != st_byte(i, j))
+      return 0;
+  return 1;
 }
 
 // inject=3: gia lap lan cap lai thu i trong O04b tra NULL, dia chi sai
@@ -307,25 +346,30 @@ st_realloc_fault(int i, char *p)
 }
 
 // O04: tra roi cap lai cung size.
-// a) object cap sau cung (nam o trang slab dau tien con slot trong) tra ve
-//    phai duoc cap lai dung slot do (LIFO)
-// b) tra 10 object roi cap lai 10: moi object cap lai phai hop le, khong
-//    chong lan object khac, va so trang trong khong doi
+// a) moi class: object cap sau cung cua class do (nam o trang slab dau tien
+//    con slot trong cua class) tra ve phai duoc cap lai dung slot do (LIFO)
+// b) tra 10 object cua ca hai class roi cap lai: moi object cap lai phai hop
+//    le, dung class, khong chong lan object khac, va so trang trong khong doi
+// c) sau b: ghi mau vao object cap lai, roi kiem mau cua moi object so huu
 // Object cap lai chi duoc so huu neu hop le va khong chong lan object khac.
 static void
 st_reuse(void)
 {
-  int L = ST_N - 1;
-  if (!st_own[L]) {
-    st_skip("O04a-reuse-same-slot");
-  } else {
+  int same = 0;
+  for (uint64 cls = 64; cls <= 128; cls += 64) {
+    int L = ST_N - 1;
+    while (L >= 0 && st_want(st_sz[L]) != cls)
+      L--;
+    if (L < 0 || !st_own[L])
+      continue;
     char *a = st_obj[L];
     kmfree(a);
     st_obj[L] = kmalloc(st_sz[L]);
-    st_own[L] = st_valid(st_obj[L], st_sz[L]) && !st_clash(L);
-    st_report("O04a-reuse-same-slot", "same_addr", (uint64)st_obj[L], (uint64)a,
-              st_obj[L] == a);
+    st_own[L] = st_ok(L) && !st_clash(L);
+    st_new[L] = st_own[L];
+    same += st_obj[L] == a;
   }
+  st_report("O04a-reuse-same-slot", "classes_same_addr", same, 2, same == 2);
 
   int tried = 0, good = 0;
   uint64 before = kfreepage_count();
@@ -334,7 +378,8 @@ st_reuse(void)
       kmfree(st_obj[i]);
       st_own[i] = 0;
       st_obj[i] = st_realloc_fault(i, kmalloc(st_sz[i]));
-      st_own[i] = st_valid(st_obj[i], st_sz[i]) && !st_clash(i);
+      st_own[i] = st_ok(i) && !st_clash(i);
+      st_new[i] = st_own[i];
       tried++;
       good += st_own[i];
     }
@@ -342,41 +387,68 @@ st_reuse(void)
   printk("KT|info|o04b_free_before=%lu|o04b_free_after=%lu\n", before, after);
   st_report("O04b-reuse-valid-no-new-page", "realloc_owned", good, tried,
             tried > 0 && good == tried && after == before);
+
+  if (st_unsafe) {
+    st_skip("O04c-pattern-after-realloc");
+    return;
+  }
+  int intact = 0, own = 0;
+  for (int i = 0; i < ST_N; i++) {
+    if (!st_own[i])
+      continue;
+    if (st_new[i])
+      for (int j = 0; j < st_sz[i]; j++)
+        st_obj[i][j] = st_byte(i, j);
+    own++;
+    intact += st_intact(i);
+  }
+  st_report("O04c-pattern-after-realloc", "owned_intact", intact, own,
+            intact == own);
 }
 
-// O05: workload vuot 1 slab.
-// a) object song nam tren it nhat ceil(n/63) trang, khong trang nao qua 63
-// b) so trang lay them tu kalloc khong vuot ceil(N/63) (cache co the da co
-//    trang trong cua slab_test, nen co the lay it hon, ke ca 0)
+// O05: workload vuot 1 slab o ca hai class. Capacity lay tu header trang
+// (hien tai 63 cho class64, 31 cho class128), khong viet cung.
+// a) moi class: so object song > capacity, nam tren it nhat ceil(n/cap)
+//    trang, va khong trang nao giu qua capacity object
+// b) so trang lay them tu kalloc khong vuot tong ceil(n/cap) cua hai class
+//    (cache co the da co trang trong cua slab_test, nen co the lay it hon)
 static void
 st_span(uint64 before, uint64 mid)
 {
   static char *pages[ST_N];
   static int cnt[ST_N];
-  int npg = 0, n = 0, over = 0;
-  for (int i = 0; i < ST_N; i++) {
-    if (!st_own[i])
-      continue;
-    n++;
-    char *pg = (char *)PGROUNDDOWN((uint64)st_obj[i]);
-    int k = 0;
-    while (k < npg && pages[k] != pg)
-      k++;
-    if (k == npg) {
-      pages[npg] = pg;
-      cnt[npg++] = 0;
+  uint64 need_all = 0;
+  for (uint64 cls = 64; cls <= 128; cls += 64) {
+    int npg = 0, n = 0, over = 0, cap = 0;
+    for (int i = 0; i < ST_N; i++) {
+      if (!st_own[i] || st_want(st_sz[i]) != cls)
+        continue;
+      n++;
+      char *pg = (char *)PGROUNDDOWN((uint64)st_obj[i]);
+      cap = *(uint16 *)(pg + 6);
+      int k = 0;
+      while (k < npg && pages[k] != pg)
+        k++;
+      if (k == npg) {
+        pages[npg] = pg;
+        cnt[npg++] = 0;
+      }
+      cnt[k]++;
     }
-    cnt[k]++;
+    for (int k = 0; k < npg; k++)
+      if (cnt[k] > *(uint16 *)(pages[k] + 6))
+        over++;
+    int need = cap ? (n + cap - 1) / cap : 0;
+    need_all += need;
+    printk("KT|info|o05_class=%lu|objects=%d|capacity=%d|pages=%d\n", cls, n,
+           cap, npg);
+    st_report(cls == 64 ? "O05a-span-pages-c64" : "O05a-span-pages-c128",
+              "pages>=ceil(n/cap)", npg, need,
+              n > cap && npg >= need && over == 0);
   }
-  for (int k = 0; k < npg; k++)
-    if (cnt[k] > *(uint16 *)(pages[k] + 6))
-      over++;
-  int need = (n + 62) / 63;
-  st_report("O05a-span-pages", "pages>=ceil(n/63)", npg, need,
-            npg >= need && over == 0);
   uint64 taken = before - mid;
-  st_report("O05b-new-pages", "taken<=ceil(N/63)", taken, (ST_N + 62) / 63,
-            mid <= before && taken <= (ST_N + 62) / 63);
+  st_report("O05b-new-pages", "taken<=sum_ceil(n/cap)", taken, need_all,
+            mid <= before && taken <= need_all);
 }
 
 // Don dep: tra object trong stash truoc, roi object dang so huu.
@@ -396,11 +468,12 @@ st_release(void)
     }
     kmfree(s);
   }
-  for (int i = 0; i < ST_N; i++)
-    if (st_own[i]) {
+  for (int i = 0; i < ST_N; i++) {
+    if (st_own[i])
       kmfree(st_obj[i]);
-      st_own[i] = 0;
-    }
+    st_own[i] = 0;
+    st_new[i] = 0;
+  }
 }
 
 // 1 chu ky workload: cap ST_N object, kiem hop le + khong chong lan, tra het.
@@ -412,7 +485,7 @@ st_cycle(void)
   for (int i = 0; i < ST_N; i++) {
     st_sz[i] = st_sizes[i % ST_NSIZES];
     st_obj[i] = kmalloc(st_sz[i]);
-    st_own[i] = st_valid(st_obj[i], st_sz[i]) && !st_clash(i);
+    st_own[i] = st_ok(i) && !st_clash(i);
     bad += !st_own[i];
   }
   st_release();
