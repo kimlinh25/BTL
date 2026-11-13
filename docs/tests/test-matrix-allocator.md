@@ -1,6 +1,6 @@
 # Test matrix allocator (T01), harness trang (T02) và harness object (T03) — Khánh
 
-Issue: #19 (N03). Bản đầu 30/10/2026. Cập nhật 31/10/2026 theo review PR #21 lần 1 (chặn ca không an toàn, kiểm tra địa chỉ trong P07, sửa mô tả cờ build) lần 2 (chống trang trùng trong P07, ghép `main` sau #22/#23, đổi tên API object) và lần 3 (P07c không trả lại trang đã có trong bitmap). Cập nhật 06/11/2026 (W03): thêm harness object T03 (mục 5, 6, 7, 8). Cập nhật 08/11/2026 theo review PR #33: O04b bắt cấp lại NULL/sai/trùng, dọn stash không free trùng (C01), `st_valid` chống tràn (V01), thêm `SLABTEST_INJECT=3/4`.
+Issue: #19 (N03). Bản đầu 30/10/2026. Cập nhật 31/10/2026 theo review PR #21 lần 1 (chặn ca không an toàn, kiểm tra địa chỉ trong P07, sửa mô tả cờ build) lần 2 (chống trang trùng trong P07, ghép `main` sau #22/#23, đổi tên API object) và lần 3 (P07c không trả lại trang đã có trong bitmap). Cập nhật 06/11/2026 (W03): thêm harness object T03 (mục 5, 6, 7, 8). Cập nhật 08/11/2026 theo review PR #33: O04b bắt cấp lại NULL/sai/trùng, dọn stash không free trùng (C01), `st_valid` chống tràn (V01), thêm `SLABTEST_INJECT=3/4`. Cập nhật 13/11/2026 (W04): chuyển harness object sang hợp đồng slab64/128 (#27): biên 0/1/64/65/127/128/129 kèm kiểm tra class, workload trộn hai class, O05 theo từng class, thêm O04c.
 
 ## 1. Cách kích hoạt
 
@@ -84,47 +84,49 @@ make clean
 make qemu CPUS=1 SLABTEST=1 SLABTEST_INJECT=4   # tự kiểm tra: dọn stash không free trùng
 ```
 
-Hợp đồng đang test (`contract=slab64`, `main` sau #23): một class 64 B, header 32 B, 63 slot/trang; `kmalloc(size)` nhận `1..64`, `size = 0` hoặc `> 64` trả 0; `kmfree(0)` là no-op.
+Hợp đồng đang test (`contract=slab64/128`, `main` sau #32): hai class, header 32 B; class64 (obj_size 64, 63 slot/trang) nhận `1..64`, class128 (obj_size 128, 31 slot/trang) nhận `65..128`; `size = 0` hoặc `> 128` trả 0; `kmfree(0)` là no-op.
 
 - Harness chạy trên CPU 0 ngay sau `slab_test()`, một lần, không gọi lại `kmalloc_init()`. Lúc này cache đã giữ sẵn trang slab rỗng do `slab_test()` tạo, nên harness không giả định cache rỗng và mọi so sánh dùng số đếm lúc bắt đầu.
-- Object hợp lệ (`st_valid`): khác 0, căn lề 8 B, `[p, p+size)` nằm trong `[PGROUNDUP(end), PHYSTOP)`, trang chứa có magic `SLAB`, đúng biên slot `32 + k * obj_size` với `k < capacity`, và `size <= obj_size`. Kiểm tra phạm vi dạng `p < PHYSTOP` và `size <= PHYSTOP − p` để `p + size` không tràn. Chỉ đọc header sau khi biết địa chỉ nằm trong RAM.
-- Ownership như mục 2: object được sở hữu khi hợp lệ (O01) và không chồng lấn object khác hoặc object trong stash (O02). Có object sai/trùng thì O03 bị bỏ qua và tính FAIL. Object cấp lại (O04) cũng chỉ được sở hữu khi hợp lệ và không chồng lấn.
+- Object hợp lệ (`st_valid`): khác 0, căn lề 8 B, `[p, p+size)` nằm trong `[PGROUNDUP(end), PHYSTOP)`, trang chứa có magic `SLAB`, đúng biên slot `32 + k * obj_size` với `k < capacity`, và `size <= obj_size`. Kiểm tra phạm vi dạng `p < PHYSTOP` và `size <= PHYSTOP − p` để `p + size` không tràn. Chỉ đọc header sau khi biết địa chỉ nằm trong RAM. Object còn phải nằm đúng class theo size đã xin (`obj_size` trong header bằng 64 với size `1..64`, bằng 128 với size `65..128`).
+- Ownership như mục 2: object được sở hữu khi hợp lệ, đúng class (O01) và không chồng lấn object khác hoặc object trong stash (O02). Có object sai/trùng thì O03 bị bỏ qua và tính FAIL. Object cấp lại (O04) cũng chỉ được sở hữu khi hợp lệ và không chồng lấn.
 - Stash: khi inject thay địa chỉ thật bằng địa chỉ giả, object thật được cất vào stash. Dọn dẹp trả stash trước, nhưng bỏ qua object trùng object đang sở hữu hoặc lặp lại trong stash (đếm ở C01), rồi mới `kmfree` object đang sở hữu. Mỗi object được trả đúng một lần.
 - Trang slab rỗng được cache giữ lại, không trả về `kalloc`. Vì vậy không yêu cầu số trang trống quay về mức trước lần cấp đầu, và trang cache giữ không bị tính là leak. O06 chỉ kiểm tra số trang ổn định sau warm-up.
 
-N = 200 object sống cùng lúc (hơn 3 trang), size yêu cầu lặp theo `1, 8, 13, 32, 63, 64`. Cột cuối là kết quả chế độ thường tại `9c5a5df`, `CPUS=1`.
+N = 200 object sống cùng lúc, size yêu cầu lặp theo `1, 8, 13, 32, 63, 64, 65, 100, 127, 128`, nên có 120 object class64 và 80 object class128 cùng sống, vượt một slab ở cả hai class. Cột cuối là kết quả chế độ thường tại `eadf7b9`, `CPUS=1` và `CPUS=2`.
 
 | ID | Kiểm tra | Cách làm | Expected | Điều kiện FAIL | Kết quả |
 |---|---|---|---|---|---|
-| B01 | Kích thước biên | `kmalloc` size 0, 1, 64, 65, 128, 129; object cấp được thì trả ngay | 1 và 64 hợp lệ; 0, 65, 128, 129 trả 0 | Khác hợp đồng | PASS (6 ca) |
+| B01 | Kích thước biên và class | `kmalloc` size 0, 1, 64, 65, 127, 128, 129; `actual` là `obj_size` của trang chứa object (0 = NULL, 1 = con trỏ sai); object cấp được thì trả ngay | 1 và 64 vào class64; 65, 127, 128 vào class128; 0 và 129 trả 0 | Khác hợp đồng | PASS (7 ca) |
 | B02 | `kmfree(0)` | Gọi `kmfree(0)` | Không panic | Kernel panic | PASS |
-| O01 | Hợp lệ, căn lề | Cấp N object, kiểm `st_valid` | Cả N hợp lệ | Có object NULL/lệch/sai slot | PASS |
+| O01 | Hợp lệ, căn lề, đúng class | Cấp N object trộn hai class, kiểm `st_valid` và `obj_size` | Cả N hợp lệ, đúng class | Có object NULL/lệch/sai slot/sai class | PASS |
 | V01 | `st_valid` từ chối con trỏ xấu | Gọi `st_valid` với 8 con trỏ xấu: NULL, lệch 4, lệch 8 trong slot, trong header, `KERNBASE`, `PHYSTOP`, `PHYSTOP − 8` size 64, `0xFFFFFFFFFFFFFFF8` size 64 | Từ chối cả 8, object 0 vẫn hợp lệ | Nhận con trỏ xấu, hoặc kernel lỗi khi đọc header | PASS |
 | O02 | Không trùng, không chồng lấn | So từng cặp vùng `[p, p+size)` của object sở hữu | 0 cặp | Có cặp chồng lấn | PASS |
 | O03 | Ghi/đọc pattern | Ghi mẫu riêng theo đúng size yêu cầu, ghi hết rồi đọc lại, kiểm lại header | N object nguyên vẹn | Có object bị đè, header hỏng, hoặc bị bỏ qua vì không an toàn | PASS |
-| O04a | Reuse cùng slot | Trả object cấp sau cùng rồi cấp lại cùng size | Cùng địa chỉ (LIFO) | Khác địa chỉ | PASS |
-| O04b | Reuse hợp lệ, không tốn trang | Trả 10 object rồi cấp lại 10 | 10/10 object cấp lại hợp lệ, không chồng lấn; `kfreepage_count()` không đổi | Có object cấp lại NULL/sai/trùng, hoặc số trang đổi | PASS |
-| O05a | Vượt 1 slab | Đếm trang chứa các object sở hữu | ≥ `ceil(n/63)` trang, không trang nào quá `capacity` | Ít hơn, hoặc trang quá `capacity` | PASS (4 trang) |
-| O05b | Trang mới khi vượt cache | `before − mid` sau khi cấp N | ≤ `ceil(N/63)` = 4 | Lớn hơn | PASS (lấy 1 trang) |
+| O04a | Reuse cùng slot | Mỗi class: trả object cấp sau cùng của class đó rồi cấp lại cùng size | Cùng địa chỉ ở cả 2 class (LIFO) | Khác địa chỉ | PASS |
+| O04b | Reuse hợp lệ, không tốn trang | Trả 10 object (cả hai class) rồi cấp lại 10 | 10/10 object cấp lại hợp lệ, đúng class, không chồng lấn; `kfreepage_count()` không đổi | Có object cấp lại NULL/sai/trùng, hoặc số trang đổi | PASS |
+| O04c | Pattern sau free/realloc | Ghi mẫu vào object vừa cấp lại, rồi đọc lại mẫu của mọi object sở hữu | Mọi object sở hữu nguyên vẹn | Có object bị đè, hoặc bị bỏ qua vì không an toàn | PASS |
+| O05a-c64 | Vượt 1 slab ở class64 | Đếm object và trang của class64; `cap` đọc từ header | `n > cap`, ≥ `ceil(n/cap)` trang, không trang nào quá `cap` | Không vượt 1 slab, ít trang hơn, hoặc trang quá `cap` | PASS (120 object, cap 63, 2 trang) |
+| O05a-c128 | Vượt 1 slab ở class128 | Như trên cho class128 | Như trên | Như trên | PASS (80 object, cap 31, 3 trang) |
+| O05b | Trang mới khi vượt cache | `before − mid` sau khi cấp N | ≤ tổng `ceil(n/cap)` của hai class = 5 | Lớn hơn | PASS (lấy 0 trang: cache đã giữ đủ trang từ `slab_test()`) |
 | C01 | Dọn dẹp không free trùng | Đếm object trong stash bị bỏ qua vì trùng object đang sở hữu hoặc lặp lại | 0 | > 0 | PASS |
 | O06 | Ổn định sau warm-up | 1 chu kỳ warm-up, rồi 5 chu kỳ cấp/trả N object | 0 chu kỳ làm đổi số trang trống | > 0, hoặc có object không sở hữu được | PASS |
 
-Kết quả chế độ thường: `pass=17|fail=0`, `free_before=32729`, `free_after=32728`. Chênh 1 trang là trang slab mới do O05 tạo và được cache giữ lại, không phải leak (`o06_base = o06_low = 32728`).
+Kết quả chế độ thường (`CPUS=1` và `CPUS=2`): `pass=20|fail=0`, `free_before=32725`, `free_after=32725`, `o06_base = o06_low = 32725`. Trang slab do `slab_test()` tạo đã đủ cho workload nên harness không lấy thêm trang; nếu cache ban đầu ít hơn, phần chênh là trang cache giữ, không phải leak.
 
 Tự kiểm tra harness object:
 
 | Chế độ | Giả lập | Expected |
 |---|---|---|
-| `SLABTEST_INJECT=1` | O02: tăng bộ đếm chồng lấn; O03: đảo 1 byte trong vùng của object 3; O06: tạm giữ 1 trang ở chu kỳ 3 | 3 FAIL: O02, O03, O06. Kernel boot tới shell |
-| `SLABTEST_INJECT=2` | O01: object 2 thành NULL, object 4 trùng object 3, object 6 lệch 8 byte; object thật được cất vào stash và trả khi dọn | 3 FAIL: O01 (198), O02 (1), O03 (bỏ qua). `free_after` bằng chế độ thường, kernel boot tới shell |
+| `SLABTEST_INJECT=1` | O02: tăng bộ đếm chồng lấn; O03: đảo 1 byte trong vùng của object 3 rồi trả lại sau khi đọc; O06: tạm giữ 1 trang ở chu kỳ 3 | 3 FAIL: O02, O03, O06. Kernel boot tới shell |
+| `SLABTEST_INJECT=2` | O01: object 2 thành NULL, object 4 trùng object 3, object 6 lệch 8 byte; object thật được cất vào stash và trả khi dọn | 4 FAIL: O01 (198), O02 (1), O03 (bỏ qua), O04c (bỏ qua). `free_after` bằng chế độ thường, kernel boot tới shell |
 | `SLABTEST_INJECT=3` | O04b: lần cấp lại object 10 trả NULL, object 11 trả địa chỉ lệch 8 byte, object 12 trả object 30 đang sống; object thật được cất vào stash | 1 FAIL: O04b (7/10). Kernel boot tới shell |
 | `SLABTEST_INJECT=4` | Trước khi dọn: đưa object 5 đang sở hữu vào stash 2 lần | 1 FAIL: C01 (2). Object 5 chỉ được trả một lần, kernel boot tới shell |
 
 Chưa chạy hoặc phụ thuộc:
 
-- Class128 (N02) chưa vào `main`. Khi vào: đổi bảng `st_bounds` (65 và 128 cấp được, 129 vẫn trả 0), đổi `ST_CONTRACT`, thêm ca object 64 B và 128 B sống cùng lúc, và ghi revision đổi hợp đồng.
-- OOM/retry tầng object dùng lại test có kiểm soát trong `slab_test()` (S02/N02). Không cấp hết RAM. OOM sâu cho T03 chuyển sang W04.
-- Chỉ chạy `CPUS=1`. Harness đồng thời 1/2/4/8 CPU không thuộc W03.
+- Hợp đồng đổi từ slab64 (`9c5a5df`) sang slab64/128 (`eadf7b9`) sau khi #32 vào `main`. Nếu layout đổi, chỉ cần cập nhật `st_bounds`, `st_want` và `ST_CONTRACT`; capacity đọc từ header.
+- OOM/retry tầng object dùng lại test có kiểm soát trong `slab_test()` (S02/N02). Không cấp hết RAM. OOM sâu tầng object chưa chạy.
+- Chạy `CPUS=1` (mọi chế độ) và `CPUS=2` (chế độ thường); harness chạy trên CPU 0 trước khi CPU khác khởi động nên kết quả không phụ thuộc số CPU. Kiểm thử đồng thời nhiều CPU chưa chạy ở harness object.
 
 ## 6. Log schema
 
@@ -140,8 +142,9 @@ KT|end|pass=<số>|fail=<số>|free_after=<số trang>|summary=<ALL_PASS/HAS_FAI
 Harness object (T03) dùng cùng dạng dòng `case`, thêm trường `harness=object` ở `begin`/`end` để tách khỏi harness trang:
 
 ```text
-KT|begin|harness=object|rev=<git describe>|cpus=<CPUS>|inject=<0/1/2/3/4>|contract=<slab64>|n=<N>|free_before=<số trang>
+KT|begin|harness=object|rev=<git describe>|cpus=<CPUS>|inject=<0/1/2/3/4>|contract=<slab64/128>|n=<N>|free_before=<số trang>
 KT|info|o04b_free_before=<số trang>|o04b_free_after=<số trang>
+KT|info|o05_class=<64/128>|objects=<số>|capacity=<số>|pages=<số>
 KT|info|o06_base=<số trang>|o06_low=<số trang>|cycles=<số chu kỳ>|bad=<số object lỗi>
 KT|end|harness=object|pass=<số>|fail=<số>|free_after=<số trang>|summary=<ALL_PASS/HAS_FAIL>
 ```
@@ -153,7 +156,7 @@ Manifest đi kèm mỗi lần chạy: người chạy, ngày, revision, OS, tool
 - PASS toàn bộ: dòng `KT|end` có `pass=12|fail=0`, và kernel boot tiếp tới `init: starting sh`.
 - FAIL: có dòng `result=FAIL`, hoặc kernel `panic`, hoặc không xuất hiện `KT|end` sau 60 giây.
 - `INJECT=1` phải ra đúng 3 FAIL; `INJECT=2` đúng 7 FAIL; `INJECT=3` đúng 3 FAIL; `INJECT=4` đúng 1 FAIL; tất cả vẫn boot tới shell. Khác đi nghĩa là harness hỏng.
-- Harness object: PASS toàn bộ khi `KT|end|harness=object` có `pass=17|fail=0` và kernel boot tới `init: starting sh`. `SLABTEST_INJECT=1` và `SLABTEST_INJECT=2` mỗi chế độ đúng 3 FAIL; `SLABTEST_INJECT=3` và `SLABTEST_INJECT=4` mỗi chế độ đúng 1 FAIL; tất cả vẫn boot tới shell. Điều kiện FAIL và thời hạn 60 giây giống harness trang.
+- Harness object: PASS toàn bộ khi `KT|end|harness=object` có `pass=20|fail=0` và kernel boot tới `init: starting sh`. `SLABTEST_INJECT=1` đúng 3 FAIL; `SLABTEST_INJECT=2` đúng 4 FAIL; `SLABTEST_INJECT=3` và `SLABTEST_INJECT=4` mỗi chế độ đúng 1 FAIL; tất cả vẫn boot tới shell. Điều kiện FAIL và thời hạn 60 giây giống harness trang.
 
 ## 8. Yêu cầu ghép file dùng chung
 
