@@ -95,6 +95,14 @@ SLABTEST_INJECT ?= 0
 CFLAGS += -DSLABTEST -DSLABTEST_INJECT=$(SLABTEST_INJECT)
 CFLAGS += -DST_CPUS=$(or $(CPUS),3) -DST_REV=\"$(shell git describe --always --dirty 2>/dev/null)\"
 endif
+
+ifeq ($(PAGESTRESS),1)
+OBJS += $K/pagestress.o
+PAGESTRESS_INJECT ?= 0
+CFLAGS += -DPAGESTRESS -DPAGESTRESS_CPUS=$(CPUS)
+CFLAGS += -DPAGESTRESS_INJECT=$(PAGESTRESS_INJECT)
+CFLAGS += -DPAGESTRESS_REV=\"$(shell git describe --always --dirty 2>/dev/null)\"
+endif
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)

@@ -65,6 +65,11 @@ uint64          kfreepage_count(void); // Returns the number of free pages in th
 // kalloctest.c
 void            kalloctest(int);
 
+// pagestress.c
+#ifdef PAGESTRESS
+void            pagestress(void);
+#endif
+
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
