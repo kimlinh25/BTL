@@ -50,5 +50,8 @@ main()
     plicinithart(); // ask PLIC for device interrupts
   }
 
+#ifdef PAGESTRESS
+  pagestress();
+#endif
   scheduler();
 }
