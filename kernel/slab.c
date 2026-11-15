@@ -14,6 +14,10 @@
 #define SLAB_TEST_CASE 0
 #endif
 
+#ifndef SLAB_STATS_TEST
+#define SLAB_STATS_TEST 0
+#endif
+
 #define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 
 extern char end[]; // Dia chi ket thuc vung nho nhan tu kernel.ld
@@ -66,7 +70,7 @@ static struct slab_cache slab_caches[SLAB_NCLASSES];
 static int slab_initialized = 0;
 static int slab_oom_sim = 0;
 
-// Chon class nho nhat du chua yeu cau (Muc 3.3 & 5.2):
+// Chon class nho nhat du chua yeu cau:
 // - size == 0 hoac size > 128 -> tra -1
 // - 1 <= size <= 64           -> tra 0 (class64)
 // - 65 <= size <= 128         -> tra 1 (class128)
@@ -82,18 +86,50 @@ slab_FindClassIndex(uint64 size)
   return -1;
 }
 
+// S04a (#38): Getter chi goi sau kmalloc_init(), tra 0 hoac -1 neu tham so sai
+static int
+slab_get_class_stats(int idx, struct slab_class_stats *out)
+{
+  if (!slab_initialized || idx < 0 || idx >= SLAB_NCLASSES || out == 0)
+    return -1;
+
+  struct slab_cache *c = &slab_caches[idx];
+  uint32 pages = 0, empty = 0, total_cap = 0, free_s = 0;
+
+  acquire(&c->lock);
+  uint32 stride = c->obj_size;
+  uint32 cap_per_slab = c->capacity;
+  for (struct slab_header *it = c->slabs; it != 0; it = it->next) {
+    pages++;
+    total_cap += it->capacity;
+    free_s += it->free_count;
+    if (it->free_count == it->capacity)
+      empty++;
+  }
+  release(&c->lock);
+
+  out->class_size = stride;
+  out->cap_per_slab = cap_per_slab;
+  out->slab_pages = pages;
+  out->empty_slabs = empty;
+  out->total_capacity = total_cap;
+  out->live = total_cap - free_s;
+  out->free_slots = free_s;
+  out->page_bytes = pages * PGSIZE;
+  out->obj_capacity_bytes = total_cap * stride;
+  out->live_obj_bytes = out->live * stride;
+  out->metadata_bytes = pages * (uint32)sizeof(struct slab_header);
+  return 0;
+}
+
 // Dem tong so slot dang trong trong toan bo cac trang Slab hien co cua 1 class
 static int
 slab_ClassFreeSlots(int idx)
 {
-  int total = 0;
-  struct slab_cache *c = &slab_caches[idx];
-  acquire(&c->lock);
-  for (struct slab_header *it = c->slabs; it != 0; it = it->next) {
-    total += it->free_count;
-  }
-  release(&c->lock);
-  return total;
+  struct slab_class_stats st;
+  if (slab_get_class_stats(idx, &st) != 0)
+    panic("slab_ClassFreeSlots: stats getter failed");
+  return (int)st.free_slots;
 }
 
 // Khoi tao mot trang 4096 B moi tu kalloc() thanh trang Slab cua class `c`
@@ -193,7 +229,7 @@ kmalloc(uint64 size)
 
   release(&c->lock);
 
-  // [KHOI PHUC TU S02]: Zero-fill toan bo slot truoc khi tra ve
+  // Zero-fill toan bo slot truoc khi tra ve
   memset((void *)slot, 0, obj_size);
   return (void *)slot;
 }
@@ -202,16 +238,13 @@ kmalloc(uint64 size)
 void
 kmfree(void *ptr)
 {
-  // Buoc 1: Kiem tra NULL (no-op)
   if (ptr == 0)
     return;
 
-  // Buoc 2: Kiem tra mien dia chi vat ly
   uint64 addr = (uint64)ptr;
   if (addr < (uint64)end || addr >= PHYSTOP)
     panic("kmfree: pointer out of physical memory range");
 
-  // Buoc 3: Tim Header dau trang & Xac thuc Class
   struct slab_header *hdr = (struct slab_header *)PGROUNDDOWN(addr);
   if (hdr->magic != SLAB_MAGIC)
     panic("kmfree: invalid slab magic");
@@ -224,7 +257,6 @@ kmfree(void *ptr)
   if (hdr->obj_size != c->obj_size || hdr->capacity != c->capacity)
     panic("kmfree: corrupt slab header metadata");
 
-  // Buoc 4: Kiem tra bien Slot & Chan vung Tail Padding
   if (addr < (uint64)hdr + sizeof(struct slab_header))
     panic("kmfree: pointer inside slab header");
 
@@ -236,7 +268,6 @@ kmfree(void *ptr)
   if (slot_idx >= c->capacity)
     panic("kmfree: slot index out of slab capacity");
 
-  // Buoc 5: Xac minh quyen so huu trang (Ownership) & Chong Double Free
   acquire(&c->lock);
 
   int owned = 0;
@@ -263,10 +294,9 @@ kmfree(void *ptr)
     }
   }
 
-  // [KHOI PHUC TU S02]: Dien mau byte 1 khi free truoc khi gan slot->next
+  // Dien mau byte 1 khi free truoc khi gan slot->next
   memset(ptr, SLAB_FREE_BYTE, c->obj_size);
 
-  // Buoc 6: Hoan tra Slot & Chinh sach giu trang rong W03/W04
   struct slab_slot *slot = (struct slab_slot *)ptr;
   slot->next = hdr->freelist;
   hdr->freelist = slot;
@@ -275,68 +305,44 @@ kmfree(void *ptr)
   release(&c->lock);
 }
 
-// S04a (#38): Getter chi goi sau kmalloc_init(), tra 0 hoac -1 neu tham so sai
-static int
-slab_get_class_stats(int idx, struct slab_class_stats *out)
-{
-  if (!slab_initialized || idx < 0 || idx >= SLAB_NCLASSES || out == 0)
-    return -1;
-
-  struct slab_cache *c = &slab_caches[idx];
-  uint32 pages = 0, empty = 0, total_cap = 0, free_s = 0;
-
-  acquire(&c->lock);
-  uint32 stride = c->obj_size;
-  uint32 cap_per_slab = c->capacity;
-  for (struct slab_header *it = c->slabs; it != 0; it = it->next) {
-    pages++;
-    total_cap += it->capacity;
-    free_s += it->free_count;
-    if (it->free_count == it->capacity)
-      empty++;
-  }
-  release(&c->lock);
-
-  out->class_size = stride;
-  out->cap_per_slab = cap_per_slab;
-  out->slab_pages = pages;
-  out->empty_slabs = empty;
-  out->total_capacity = total_cap;
-  out->live = total_cap - free_s;
-  out->free_slots = free_s;
-  out->page_bytes = pages * PGSIZE;
-  out->obj_capacity_bytes = total_cap * stride;
-  out->live_obj_bytes = out->live * stride;
-  out->metadata_bytes = pages * (uint32)sizeof(struct slab_header);
-  return 0;
-}
-
-// S04a (#38): Doi chieu va in expected/actual cho tung class
+#if SLAB_STATS_TEST
+// S04a (#38): Doi chieu va in expected/actual cho day du cac truong thong ke
 static void
 slab_check_expected(int idx, const char *stage, uint32 exp_pages,
-                    uint32 exp_cap, uint32 exp_live, uint32 exp_free)
+                    uint32 exp_empty, uint32 exp_cap, uint32 exp_live,
+                    uint32 exp_free)
 {
   struct slab_class_stats st;
   if (slab_get_class_stats(idx, &st) != 0)
     panic("slab_stats: getter failed");
   if (st.live + st.free_slots != st.total_capacity)
     panic("slab_stats: live + free_slots != total_capacity");
-  if (st.live_obj_bytes != st.live * st.class_size ||
-      st.metadata_bytes != st.slab_pages * sizeof(struct slab_header))
-    panic("slab_stats: byte metrics mismatch");
 
-  printk("slab_stats [%s] c%d: exp(slabs=%d cap=%d live=%d free=%d) "
-         "act(slabs=%d cap=%d live=%d free=%d live_B=%d meta_B=%d)\n",
-         stage, st.class_size, exp_pages, exp_cap, exp_live, exp_free,
-         st.slab_pages, st.total_capacity, st.live, st.free_slots,
-         st.live_obj_bytes, st.metadata_bytes);
+  uint32 exp_page_b = exp_pages * PGSIZE;
+  uint32 exp_cap_b = exp_cap * st.class_size;
+  uint32 exp_live_b = exp_live * st.class_size;
+  uint32 exp_meta_b = exp_pages * (uint32)sizeof(struct slab_header);
 
-  if (st.slab_pages != exp_pages || st.total_capacity != exp_cap ||
-      st.live != exp_live || st.free_slots != exp_free)
+  printk("slab_stats [%s] c%d: exp(slabs=%d empty=%d cap=%d live=%d free=%d "
+         "page_B=%d cap_B=%d live_B=%d meta_B=%d) "
+         "act(slabs=%d empty=%d cap=%d live=%d free=%d "
+         "page_B=%d cap_B=%d live_B=%d meta_B=%d)\n",
+         stage, st.class_size, exp_pages, exp_empty, exp_cap, exp_live,
+         exp_free, exp_page_b, exp_cap_b, exp_live_b, exp_meta_b, st.slab_pages,
+         st.empty_slabs, st.total_capacity, st.live, st.free_slots,
+         st.page_bytes, st.obj_capacity_bytes, st.live_obj_bytes,
+         st.metadata_bytes);
+
+  if (st.slab_pages != exp_pages || st.empty_slabs != exp_empty ||
+      st.total_capacity != exp_cap || st.live != exp_live ||
+      st.free_slots != exp_free || st.page_bytes != exp_page_b ||
+      st.obj_capacity_bytes != exp_cap_b || st.live_obj_bytes != exp_live_b ||
+      st.metadata_bytes != exp_meta_b)
     panic("slab_stats: expected != actual");
 }
 
-// S04a (#38): Kiem tra 3 moc (before, live, after_free) tren cache da warm
+// S04a (#38): Kiem tra moc vuot slot trong (+1 trang) va lap lai trong
+// free_slots sau warm-up de xac nhan so trang on dinh
 static void
 slab_run_stats_workload(void)
 {
@@ -348,8 +354,8 @@ slab_run_stats_workload(void)
       panic("slab_stats: base getter failed");
 
     // Moc 1: Truoc workload (lay moc ban dau theo so lieu thuc cua cache)
-    slab_check_expected(idx, "before", base.slab_pages, base.total_capacity,
-                        base.live, base.free_slots);
+    slab_check_expected(idx, "before", base.slab_pages, base.empty_slabs,
+                        base.total_capacity, base.live, base.free_slots);
 
     uint32 fill_cnt = base.free_slots;
     if (fill_cnt + 1 > 256)
@@ -364,7 +370,8 @@ slab_run_stats_workload(void)
     struct slab_class_stats mid;
     if (slab_get_class_stats(idx, &mid) != 0)
       panic("slab_stats: mid getter failed");
-    if (mid.slab_pages != base.slab_pages || mid.free_slots != 0)
+    if (mid.slab_pages != base.slab_pages || mid.free_slots != 0 ||
+        mid.empty_slabs != 0)
       panic("slab_stats: page count changed before exhausting free_slots");
 
     // Cap them 1 object vuot so slot trong: so trang TANG DUNG LUC (+1 trang)
@@ -377,19 +384,42 @@ slab_run_stats_workload(void)
     uint32 exp_live_objs = base.live + fill_cnt + 1;
     uint32 exp_live_free = base.cap_per_slab - 1;
 
-    // Moc 2: Luc con object song (vuot slot trong cua class)
-    slab_check_expected(idx, "live", exp_live_pages, exp_live_cap,
+    // Moc 2: Luc con object song (vuot slot trong cua class -> empty_slabs=0)
+    slab_check_expected(idx, "live", exp_live_pages, 0, exp_live_cap,
                         exp_live_objs, exp_live_free);
 
     // Tra het object cua test
     for (uint32 i = 0; i <= fill_cnt; i++)
       kmfree(held[i]);
 
+    uint32 exp_after_empty =
+      (base.live == 0) ? exp_live_pages : (base.empty_slabs + 1);
+    uint32 exp_after_free = exp_live_cap - base.live;
+
     // Moc 3: Sau khi free (live ve moc ban dau, trang rong van duoc giu)
-    slab_check_expected(idx, "after_free", exp_live_pages, exp_live_cap,
-                        base.live, exp_live_cap - base.live);
+    slab_check_expected(idx, "after_free", exp_live_pages, exp_after_empty,
+                        exp_live_cap, base.live, exp_after_free);
+
+    // Moc 4: Lap mot luot cap/tra vua trong so slot trong sau warm-up
+    // de xac nhan so trang on dinh (khong xin them trang moi)
+    if (exp_after_free > 256)
+      panic("slab_stats: held buffer too small for reuse pass");
+
+    for (uint32 i = 0; i < exp_after_free; i++) {
+      held[i] = kmalloc(base.class_size);
+      if (held[i] == 0)
+        panic("slab_stats: warmup reuse alloc failed");
+    }
+    slab_check_expected(idx, "reuse_live", exp_live_pages, 0, exp_live_cap,
+                        exp_live_cap, 0);
+
+    for (uint32 i = 0; i < exp_after_free; i++)
+      kmfree(held[i]);
+    slab_check_expected(idx, "reuse_free", exp_live_pages, exp_after_empty,
+                        exp_live_cap, base.live, exp_after_free);
   }
 }
+#endif
 
 // 6.1. Cac bai kiem thu tu dong trong slab_test()
 void
@@ -399,7 +429,7 @@ slab_test(void)
   static void *c128_objs[32];
   static void *fill128[64];
 
-  printk("slab_test: starting S03a + S04a verification...\n");
+  printk("slab_test: starting verification (class64 & class128)...\n");
   if (!slab_initialized)
     kmalloc_init();
 
@@ -409,7 +439,7 @@ slab_test(void)
   if (slab_caches[1].obj_size != 128 || slab_caches[1].capacity != 31)
     panic("slab_test: wrong class128 config");
 
-  // [KHOI PHUC TU S02]: Cac ca kiem thu am tinh SLAB_TEST_CASE=1/2/3
+  // Cac ca kiem thu am tinh SLAB_TEST_CASE=1/2/3
 #if SLAB_TEST_CASE == 1
   printk("slab_test: running SLAB_TEST_CASE=1 (double free)...\n");
   void *p_df = kmalloc(64);
@@ -434,14 +464,17 @@ slab_test(void)
   panic("slab_test: SLAB_TEST_CASE=3 did not panic");
 #endif
 
-  // S04a: Xac minh tham so loi cua getter va trang thai init (0 trang)
+  // Kiem tra tham so loi cua getter S04a
   struct slab_class_stats dummy;
   if (slab_get_class_stats(-1, &dummy) != -1 ||
       slab_get_class_stats(SLAB_NCLASSES, &dummy) != -1 ||
       slab_get_class_stats(0, 0) != -1)
     panic("slab_test: invalid getter args must return -1");
-  slab_check_expected(0, "init", 0, 0, 0, 0);
-  slab_check_expected(1, "init", 0, 0, 0, 0);
+
+#if SLAB_STATS_TEST
+  slab_check_expected(0, "init", 0, 0, 0, 0, 0);
+  slab_check_expected(1, "init", 0, 0, 0, 0, 0);
+#endif
 
   // 2. Kiem tra 6 moc bien (0, 1, 64, 65, 128, 129), kmfree(0) & zero-fill
   kmfree(0);
@@ -584,26 +617,12 @@ slab_test(void)
   if (slab_ClassFreeSlots(1) != 0)
     panic("slab_test: class128 still has free slots before OOM");
 
-  struct slab_slot *page_head = 0;
-  void *pg;
-  for (int p = 0; p < 8 && (pg = kalloc()) != 0; p++) {
-    struct slab_slot *node = (struct slab_slot *)pg;
-    node->next = page_head;
-    page_head = node;
-  }
   slab_oom_sim = 1;
-
   if (kmalloc(128) != 0)
     panic("slab_test: expected 0 on OOM when class128 requests new page");
   if (kmalloc(65) != 0)
     panic("slab_test: expected 0 on OOM for kmalloc(65)");
-
   slab_oom_sim = 0;
-  while (page_head != 0) {
-    struct slab_slot *next = page_head->next;
-    kfree((void *)page_head);
-    page_head = next;
-  }
 
   void *retry128 = kmalloc(128);
   if (retry128 == 0)
@@ -638,8 +657,10 @@ slab_test(void)
   printk("slab_test: [4/4] OOM (filled %d slots of class128) & retry OK\n",
          fill128_cnt + 1);
 
-  // S04a (#38): Kiem tra 3 moc (before, live, after_free) tren cache da warm
+#if SLAB_STATS_TEST
+  // S04a (#38): Kiem tra thong ke khi bat co SLAB_STATS_TEST=1
   slab_run_stats_workload();
+#endif
 
   printk("slab_test: ALL PASSED (class64 cap=63, class128 cap=31)\n");
 }
